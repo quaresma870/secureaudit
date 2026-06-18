@@ -170,6 +170,15 @@ PYTHONPATH=. pytest tests/ -v
 
 ---
 
+## Changelog
+
+### v1.0.1
+- fix: `datetime.utcnow()` replaced with `datetime.now(timezone.utc)` — closes #3
+- fix: CVE plugin now reports network failures as `INFO` finding instead of silently passing — closes #6
+- feat: plugins now run in parallel via `ThreadPoolExecutor` — full scan ~4× faster — closes #1
+
+---
+
 ## License
 
 MIT
