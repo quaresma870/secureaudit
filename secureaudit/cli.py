@@ -41,9 +41,18 @@ def cli():
 @click.option("--plugins", "-p", default=None, help="Comma-separated list of plugins to run")
 @click.option("--output", "-o", default=None, help="Write HTML report to file")
 @click.option("--json", "json_out", default=None, help="Write JSON report to file")
+@click.option("--sarif", "sarif_out", default=None, help="Write SARIF 2.1.0 report to file")
+@click.option("--db", default=None, help="SQLite database to persist results for history")
 @click.option("--fail-below", default=None, type=int, help="Exit 1 if score below threshold")
 @click.option("--no-terminal", is_flag=True, help="Suppress terminal output")
-def scan(target, config, plugins, output, json_out, fail_below, no_terminal, sarif_out, db):
+@click.option("--baseline-file", default=None,
+              help="Path to baseline file (default: <target>/.secureaudit-baseline.json if present)")
+@click.option("--no-baseline", is_flag=True, help="Ignore baseline file even if present")
+@click.option("--no-inline-suppress", is_flag=True, help="Ignore inline 'secureaudit-ignore' comments")
+def scan(
+    target, config, plugins, output, json_out, sarif_out, db, fail_below,
+    no_terminal, baseline_file, no_baseline, no_inline_suppress,
+):
     """Run a security audit on TARGET (default: current directory)."""
 
     cfg = load_config(config or Path(target) / "secureaudit.yml")
@@ -59,6 +68,23 @@ def scan(target, config, plugins, output, json_out, fail_below, no_terminal, sar
 
     engine = AuditEngine(cfg)
     result = engine.run(target, plugin_list)
+
+    # ── Baseline + inline suppression ───────────────────────────────────────
+    from secureaudit.core.baseline import apply_suppressions, default_baseline_path
+
+    bpath = None
+    if not no_baseline:
+        bpath = Path(baseline_file) if baseline_file else default_baseline_path(target)
+        if not bpath.exists():
+            bpath = None
+
+    apply_suppressions(
+        result,
+        target=Path(target),
+        baseline_path=bpath,
+        exclude_paths=set(cfg.exclude_paths),
+        check_inline=not no_inline_suppress,
+    )
 
     if not no_terminal:
         _print_result(result, threshold)
@@ -86,6 +112,36 @@ def scan(target, config, plugins, output, json_out, fail_below, no_terminal, sar
     if result.score < threshold:
         console.print(f"\n[bold red]✘ Score {result.score} is below threshold {threshold}. Failing.[/bold red]\n")
         sys.exit(1)
+
+
+@cli.command()
+@click.argument("target", default=".", type=click.Path(exists=True))
+@click.option("--config", "-c", default=None, help="Path to secureaudit.yml")
+@click.option("--plugins", "-p", default=None, help="Comma-separated list of plugins to run")
+@click.option("--baseline-file", default=None,
+              help="Path to write baseline (default: <target>/.secureaudit-baseline.json)")
+@click.option("--force", is_flag=True, help="Replace baseline entirely instead of merging")
+def baseline(target, config, plugins, baseline_file, force):
+    """Snapshot current findings as an accepted baseline.
+
+    Findings present in the baseline are suppressed (but still visible,
+    labelled 'baseline') in future scans. Run this once after triaging
+    existing findings you've decided are acceptable risk or false positives.
+    """
+    from secureaudit.core.baseline import default_baseline_path, save_baseline
+
+    cfg = load_config(config or Path(target) / "secureaudit.yml")
+    plugin_list = [p.strip() for p in plugins.split(",")] if plugins else None
+
+    console.print(f"\n[dim]Scanning[/dim] [green]{target}[/green] [dim]to build baseline...[/dim]\n")
+    engine = AuditEngine(cfg)
+    result = engine.run(target, plugin_list)
+
+    path = Path(baseline_file) if baseline_file else default_baseline_path(target)
+    count = save_baseline(path, result.all_findings, str(target), merge=not force)
+
+    console.print(f"[green]✔[/green] Baseline saved: [bold]{path}[/bold] ({count} finding(s) accepted)")
+    console.print("[dim]Future scans will suppress these findings (shown separately, not hidden).[/dim]\n")
 
 
 @cli.command(name="list-plugins")
@@ -119,6 +175,9 @@ def _print_result(result, threshold: int) -> None:
     score_color = "red" if score < 60 else "yellow" if score < 75 else "green"
     status = "✘ FAIL" if score < threshold else "✔ PASS"
     status_color = "red" if score < threshold else "green"
+    suppressed_line = ""
+    if result.suppressed_findings:
+        suppressed_line = f"\n[dim]🔇 {len(result.suppressed_findings)} suppressed (baseline/inline — not counted in score)[/dim]"
 
     # Score panel
     console.print(Panel(
@@ -129,7 +188,8 @@ def _print_result(result, threshold: int) -> None:
         f"[red]■[/red] {counts.get('HIGH',0)} High  "
         f"[yellow]■[/yellow] {counts.get('MEDIUM',0)} Medium  "
         f"[blue]■[/blue] {counts.get('LOW',0)} Low  "
-        f"[dim]■[/dim] {counts.get('INFO',0)} Info",
+        f"[dim]■[/dim] {counts.get('INFO',0)} Info"
+        f"{suppressed_line}",
         title="Security Score",
         border_style=score_color,
     ))

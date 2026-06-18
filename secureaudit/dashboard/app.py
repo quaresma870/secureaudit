@@ -56,8 +56,8 @@ def create_app(db_path: str) -> FastAPI:
                 f'<td>{r["timestamp"][:16]}</td>'
                 f'<td style="color:var(--{score_color})">{r["score"]}</td>'
                 f'<td class="grade grade-{grade}">{grade}</td>'
-                f'<td style="color:var(--critical)">{r["errors"]}</td>'
-                f'<td>{r["total"]}</td></tr>\n'
+                f'<td style="color:var(--critical)">{r["critical_high"]}</td>'
+                f'<td>{r["total_findings"]}</td></tr>\n'
             )
 
         if not rows:
@@ -102,8 +102,9 @@ def create_app(db_path: str) -> FastAPI:
 <div class="card" style="display:flex;gap:2rem;align-items:center">
   <div><div class="grade grade-{grade}">{run["score"]}</div><div style="color:var(--muted)">Score</div></div>
   <div><div class="grade grade-{grade}">{grade}</div><div style="color:var(--muted)">Grade</div></div>
-  <div><div style="font-size:1.5rem;color:var(--critical)">{run["errors"]}</div><div style="color:var(--muted)">High+Critical</div></div>
-  <div><div style="font-size:1.5rem">{run["total"]}</div><div style="color:var(--muted)">Total entries</div></div>
+  <div><div style="font-size:1.5rem;color:var(--critical)">{run["critical_high"]}</div><div style="color:var(--muted)">High+Critical</div></div>
+  <div><div style="font-size:1.5rem">{run["total_findings"]}</div><div style="color:var(--muted)">Total findings</div></div>
+  <div><div style="font-size:1.5rem;color:var(--muted)">{run["suppressed_count"]}</div><div style="color:var(--muted)">Suppressed</div></div>
   <div><div style="font-size:1rem;color:var(--muted)">{run["duration_ms"]:.0f}ms</div><div style="color:var(--muted)">Duration</div></div>
 </div>
 <div class="card">

@@ -46,6 +46,8 @@ _TEMPLATE = """<!DOCTYPE html>
   .badge-INFO{{background:#1a1d27;color:var(--info)}}
   .plugin-ok{{color:#22c55e}}
   .plugin-fail{{color:var(--critical)}}
+  .suppressed-row{{opacity:.6}}
+  .badge-suppressed{{background:#1a1d27;color:var(--muted);border:1px solid var(--border)}}
   .chart-wrap{{height:220px;position:relative}}
   details{{margin:.5rem 0}}
   summary{{cursor:pointer;color:var(--muted);font-size:.8rem}}
@@ -107,6 +109,8 @@ _TEMPLATE = """<!DOCTYPE html>
     {finding_rows}
   </table>
 </div>
+
+{suppressed_section}
 
 <footer>SecureAudit &nbsp;|&nbsp; {timestamp}</footer>
 
@@ -172,6 +176,28 @@ def write_html(result: AuditResult, path: str | Path) -> None:
             f"<td>{f.plugin}</td><td>{f.title}</td><td>{details}</td></tr>\n"
         )
 
+    suppressed_rows = ""
+    for f in result.suppressed_findings:
+        details = f.description[:120]
+        if f.file:
+            details += f"<br><code>{f.file}{':' + str(f.line) if f.line else ''}</code>"
+        suppressed_rows += (
+            f'<tr class="suppressed-row"><td><span class="badge badge-{f.severity.value}">{f.severity.value}</span></td>'
+            f"<td>{f.plugin}</td><td>{f.title}</td><td>{details}</td>"
+            f'<td><span class="badge badge-suppressed">{f.suppressed_reason or "suppressed"}</span></td></tr>\n'
+        )
+
+    suppressed_section = ""
+    if result.suppressed_findings:
+        suppressed_section = (
+            '<div class="card">'
+            f'<h2>🔇 Suppressed Findings ({len(result.suppressed_findings)})</h2>'
+            '<p class="sub" style="margin-bottom:1rem">Accepted via baseline or inline '
+            '<code>secureaudit-ignore</code> comments — not counted in the score above.</p>'
+            '<table><tr><th>Severity</th><th>Plugin</th><th>Title</th><th>Details</th><th>Reason</th></tr>'
+            f"{suppressed_rows}</table></div>"
+        )
+
     html = _TEMPLATE.format(
         target=result.target,
         timestamp=result.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -185,6 +211,7 @@ def write_html(result: AuditResult, path: str | Path) -> None:
         low=counts.get("LOW", 0) + counts.get("INFO", 0),
         plugin_rows=plugin_rows,
         finding_rows=finding_rows or "<tr><td colspan='4' style='text-align:center;color:var(--muted)'>No findings</td></tr>",
+        suppressed_section=suppressed_section,
         json_data=json.dumps(result.to_dict(), default=str),
     )
 

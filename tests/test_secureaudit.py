@@ -427,3 +427,268 @@ class TestNewPluginsConfig:
         plugins = available_plugins()
         for name in ("cors", "git_history", "sast", "malware", "trivy"):
             assert name in plugins, f"{name} should be registered"
+
+
+# ── Finding fingerprint / rule_slug ──────────────────────────────────────────
+
+class TestFindingFingerprint:
+    def test_rule_slug_from_title(self):
+        f = Finding(plugin="secrets", title="AWS Access Key detected", severity=Severity.CRITICAL, description="")
+        assert f.rule_slug == "aws-access-key-detected"
+
+    def test_rule_slug_prefers_rule_id(self):
+        f = Finding(plugin="sast", title="SAST: foo", severity=Severity.HIGH, description="",
+                    extra={"rule_id": "python.lang.security.sql-injection"})
+        assert f.rule_slug == "python-lang-security-sql-injection"
+
+    def test_fingerprint_stable_across_line_changes(self):
+        f1 = Finding(plugin="secrets", title="AWS Access Key detected", severity=Severity.CRITICAL,
+                     description="", file="app.py", line=10)
+        f2 = Finding(plugin="secrets", title="AWS Access Key detected", severity=Severity.CRITICAL,
+                     description="", file="app.py", line=42)
+        assert f1.fingerprint() == f2.fingerprint()
+
+    def test_fingerprint_differs_by_file(self):
+        f1 = Finding(plugin="secrets", title="AWS Access Key detected", severity=Severity.CRITICAL,
+                     description="", file="app.py")
+        f2 = Finding(plugin="secrets", title="AWS Access Key detected", severity=Severity.CRITICAL,
+                     description="", file="other.py")
+        assert f1.fingerprint() != f2.fingerprint()
+
+    def test_fingerprint_differs_by_plugin(self):
+        f1 = Finding(plugin="secrets", title="Issue", severity=Severity.HIGH, description="", file="a.py")
+        f2 = Finding(plugin="sast", title="Issue", severity=Severity.HIGH, description="", file="a.py")
+        assert f1.fingerprint() != f2.fingerprint()
+
+
+# ── Baseline ──────────────────────────────────────────────────────────────────
+
+class TestBaseline:
+    def test_save_and_load_baseline(self):
+        from secureaudit.core.baseline import load_baseline, save_baseline
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / ".secureaudit-baseline.json"
+            findings = [
+                Finding(plugin="secrets", title="AWS Access Key detected",
+                       severity=Severity.CRITICAL, description="", file="app.py"),
+            ]
+            count = save_baseline(path, findings, target=d)
+            assert count == 1
+            assert path.exists()
+
+            data = load_baseline(path)
+            assert data["version"] == 1
+            assert len(data["fingerprints"]) == 1
+
+    def test_merge_preserves_existing_entries(self):
+        from secureaudit.core.baseline import load_baseline, save_baseline
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / ".secureaudit-baseline.json"
+            f1 = Finding(plugin="secrets", title="Issue A", severity=Severity.HIGH, description="", file="a.py")
+            f2 = Finding(plugin="secrets", title="Issue B", severity=Severity.HIGH, description="", file="b.py")
+
+            save_baseline(path, [f1], target=d)
+            save_baseline(path, [f2], target=d, merge=True)
+
+            data = load_baseline(path)
+            assert len(data["fingerprints"]) == 2
+
+    def test_force_replaces_baseline(self):
+        from secureaudit.core.baseline import load_baseline, save_baseline
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / ".secureaudit-baseline.json"
+            f1 = Finding(plugin="secrets", title="Issue A", severity=Severity.HIGH, description="", file="a.py")
+            f2 = Finding(plugin="secrets", title="Issue B", severity=Severity.HIGH, description="", file="b.py")
+
+            save_baseline(path, [f1], target=d)
+            save_baseline(path, [f2], target=d, merge=False)
+
+            data = load_baseline(path)
+            assert len(data["fingerprints"]) == 1
+
+    def test_apply_suppressions_moves_baselined_findings(self):
+        from secureaudit.core.baseline import apply_suppressions, save_baseline
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            bpath = target / ".secureaudit-baseline.json"
+
+            finding = Finding(plugin="secrets", title="AWS Access Key detected",
+                              severity=Severity.CRITICAL, description="", file="app.py")
+            save_baseline(bpath, [finding], target=str(target))
+
+            result = AuditResult(target=str(target))
+            pr = PluginResult(plugin="secrets")
+            pr.findings = [
+                Finding(plugin="secrets", title="AWS Access Key detected",
+                       severity=Severity.CRITICAL, description="", file="app.py"),
+                Finding(plugin="secrets", title="GitHub Token detected",
+                       severity=Severity.CRITICAL, description="", file="other.py"),
+            ]
+            result.plugin_results = [pr]
+
+            apply_suppressions(result, target=target, baseline_path=bpath)
+
+            assert len(result.suppressed_findings) == 1
+            assert result.suppressed_findings[0].suppressed_reason == "baseline"
+            assert len(result.all_findings) == 1
+            assert result.all_findings[0].title == "GitHub Token detected"
+
+    def test_score_excludes_suppressed_findings(self):
+        from secureaudit.core.baseline import apply_suppressions, save_baseline
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            bpath = target / ".secureaudit-baseline.json"
+            finding = Finding(plugin="secrets", title="Issue", severity=Severity.CRITICAL,
+                              description="", file="app.py")
+            save_baseline(bpath, [finding], target=str(target))
+
+            result = AuditResult(target=str(target))
+            pr = PluginResult(plugin="secrets")
+            pr.findings = [Finding(plugin="secrets", title="Issue", severity=Severity.CRITICAL,
+                                   description="", file="app.py")]
+            result.plugin_results = [pr]
+
+            apply_suppressions(result, target=target, baseline_path=bpath)
+            assert result.score == 100  # baselined CRITICAL no longer penalises score
+
+
+# ── Inline suppressions ──────────────────────────────────────────────────────
+
+class TestInlineSuppressions:
+    def test_simple_ignore_comment(self):
+        from secureaudit.core.baseline import scan_inline_suppressions
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "app.py").write_text(
+                'API_KEY = "test123"  # secureaudit-ignore\n'
+            )
+            rules = scan_inline_suppressions(target, exclude_paths=set())
+            assert ("app.py", 1) in rules
+
+    def test_ignore_with_rule_slug(self):
+        from secureaudit.core.baseline import scan_inline_suppressions
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "app.py").write_text(
+                'X = 1  # secureaudit-ignore: hardcoded-password reason="test fixture"\n'
+            )
+            rules = scan_inline_suppressions(target, exclude_paths=set())
+            rule = rules[("app.py", 1)]
+            assert rule.rule_slug == "hardcoded-password"
+            assert rule.reason == "test fixture"
+
+    def test_ignore_with_until_date(self):
+        from secureaudit.core.baseline import scan_inline_suppressions
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "app.py").write_text(
+                "X = 1  # secureaudit-ignore: foo until=2099-01-01\n"
+            )
+            rules = scan_inline_suppressions(target, exclude_paths=set())
+            rule = rules[("app.py", 1)]
+            assert rule.until.isoformat() == "2099-01-01"
+
+    def test_expired_suppression_not_applied(self):
+        from datetime import date
+
+        from secureaudit.core.baseline import SuppressionRule
+        rule = SuppressionRule(rule_slug=None, reason=None, until=date(2000, 1, 1))
+        assert rule.is_expired()
+
+    def test_future_suppression_not_expired(self):
+        from datetime import date
+
+        from secureaudit.core.baseline import SuppressionRule
+        rule = SuppressionRule(rule_slug=None, reason=None, until=date(2099, 1, 1))
+        assert not rule.is_expired()
+
+    def test_inline_suppression_applied_in_apply_suppressions(self):
+        from secureaudit.core.baseline import apply_suppressions
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "app.py").write_text(
+                'PWD = "x"  # secureaudit-ignore: hardcoded-password\n'
+            )
+            result = AuditResult(target=str(target))
+            pr = PluginResult(plugin="secrets")
+            pr.findings = [
+                Finding(plugin="secrets", title="Hardcoded Password", severity=Severity.HIGH,
+                       description="", file="app.py", line=1),
+            ]
+            result.plugin_results = [pr]
+
+            apply_suppressions(result, target=target, baseline_path=None, check_inline=True)
+            assert len(result.suppressed_findings) == 1
+            assert "inline" in result.suppressed_findings[0].suppressed_reason
+
+
+# ── CLI integration (catches signature/decorator bugs) ───────────────────────
+
+class TestCLIIntegration:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_scan_command_runs_without_crashing(self):
+        """Regression test: scan() previously referenced --sarif/--db params
+        with no corresponding @click.option decorators, causing a TypeError
+        at invocation time. This test would have caught that.
+        """
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            result = runner.invoke(cli, ["scan", d, "--plugins", "policy", "--no-terminal"])
+            assert result.exit_code == 0, result.output
+
+    def test_scan_with_sarif_and_db_flags(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            sarif_path = Path(d) / "out.sarif"
+            db_path = Path(d) / "audits.db"
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "policy", "--no-terminal",
+                "--sarif", str(sarif_path), "--db", str(db_path),
+            ])
+            assert result.exit_code == 0, result.output
+            assert sarif_path.exists()
+            assert db_path.exists()
+
+    def test_baseline_command(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            result = runner.invoke(cli, ["baseline", d, "--plugins", "policy"])
+            assert result.exit_code == 0, result.output
+            assert (Path(d) / ".secureaudit-baseline.json").exists()
+
+    def test_scan_respects_baseline(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            # No .gitignore → policy plugin will flag it
+            r1 = runner.invoke(cli, ["baseline", d, "--plugins", "policy"])
+            assert r1.exit_code == 0
+
+            r2 = runner.invoke(cli, ["scan", d, "--plugins", "policy", "--no-terminal", "--fail-below", "0"])
+            assert r2.exit_code == 0
+
+    def test_list_plugins_includes_new_plugins(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["list-plugins"])
+        assert result.exit_code == 0
+        for name in ("cors", "git_history", "sast", "malware", "trivy"):
+            assert name in result.output

@@ -4,6 +4,8 @@ Core data models — shared across all plugins and reports.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -52,6 +54,27 @@ class Finding:
     remediation: str | None = None
     reference: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    suppressed_reason: str | None = None
+
+    @property
+    def rule_slug(self) -> str:
+        """Stable, human-readable identifier for this finding's rule.
+
+        Prefers an explicit rule id from plugin metadata (e.g. Semgrep check_id,
+        Trivy check ID) and falls back to a slugified title.
+        """
+        base = self.extra.get("rule_id") or self.extra.get("check_id") or self.title
+        slug = re.sub(r"[^a-z0-9]+", "-", str(base).lower()).strip("-")
+        return slug or "unknown-rule"
+
+    def fingerprint(self) -> str:
+        """Stable fingerprint independent of line number drift.
+
+        Used by baseline/suppression matching so that findings survive
+        minor file edits that shift line numbers without changing the issue.
+        """
+        key = f"{self.plugin}:{self.rule_slug}:{self.file or ''}"
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +88,8 @@ class Finding:
             "remediation": self.remediation,
             "reference": self.reference,
             "extra": self.extra,
+            "fingerprint": self.fingerprint(),
+            "suppressed_reason": self.suppressed_reason,
         }
 
 
@@ -103,6 +128,7 @@ class AuditResult:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     plugin_results: list[PluginResult] = field(default_factory=list)
     duration_ms: float = 0.0
+    suppressed_findings: list[Finding] = field(default_factory=list)
 
     @property
     def all_findings(self) -> list[Finding]:
@@ -146,6 +172,8 @@ class AuditResult:
             "grade": self.grade,
             "duration_ms": self.duration_ms,
             "severity_counts": self.counts_by_severity(),
+            "suppressed_count": len(self.suppressed_findings),
+            "suppressed": [f.to_dict() for f in self.suppressed_findings],
             "plugins": [
                 {
                     "plugin": pr.plugin,

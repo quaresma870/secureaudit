@@ -70,6 +70,12 @@ PYTHONPATH=. python -m secureaudit.cli scan . --fail-below 80
 # Scheduled audit (weekly, alert on regression)
 PYTHONPATH=. python -m secureaudit.cli schedule . --cron "0 6 * * 1" --db audits.db --alert-webhook URL
 
+# Accept current findings as baseline (run once after initial triage)
+PYTHONPATH=. python -m secureaudit.cli baseline .
+
+# Scan — baseline and inline suppressions applied automatically
+PYTHONPATH=. python -m secureaudit.cli scan .
+
 # List available plugins
 PYTHONPATH=. python -m secureaudit.cli list-plugins
 ```
@@ -179,6 +185,18 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.5
+- feat: baseline command (`secureaudit baseline .`) — accept existing findings as known risk — closes #16
+  (`.secureaudit-baseline.json`, fingerprint independent of line-number drift, merge or `--force` replace)
+- feat: inline suppression via `# secureaudit-ignore` comments — closes #16
+  (optional rule slug, `reason="..."`, and `until=YYYY-MM-DD` for forced re-review)
+- feat: suppressed findings shown separately in terminal/HTML reports (not hidden, excluded from score)
+- fix: `scan` command was missing `--sarif`/`--db` option decorators despite using them — caused
+  a `TypeError` at invocation; added CLI integration tests (`CliRunner`) to catch this class of bug going forward
+- fix: `reports/history.py` referenced non-existent `AuditResult.total`/`.sources`/`.error_rate` —
+  rewrote SQLite schema to match actual model fields, added `suppressed_count` tracking
+- fix: dashboard updated to match corrected history schema column names
 
 ### v1.0.4
 - feat: SAST plugin via Semgrep (`sast`) — closes #13
