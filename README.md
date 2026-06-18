@@ -174,16 +174,14 @@ PYTHONPATH=. pytest tests/ -v
 
 ### v1.0.2
 - feat: SARIF 2.1.0 output (`--sarif results.sarif`) for GitHub Security tab — closes #2
-- feat: SQLite audit history (`--db audits.db`) — closes #4
-- feat: web dashboard (`secureaudit serve --db audits.db`) — closes #5
-  - `GET /` — run history with scores and grades
-  - `GET /run/{id}` — full finding breakdown
-  - `GET /api/runs` — JSON API
+- feat: SQLite audit history (`--db audits.db`) + `history` subcommand — closes #4
+- feat: web dashboard (`secureaudit serve --db audits.db`) at `http://localhost:8080` — closes #5
+  (`GET /` history, `GET /run/{id}` details, `GET /api/runs` JSON API)
 
 ### v1.0.1
-- fix: `datetime.utcnow()` replaced with `datetime.now(timezone.utc)` — closes #3
-- fix: CVE plugin now reports network failures as `INFO` finding instead of silently passing — closes #6
-- feat: plugins now run in parallel via `ThreadPoolExecutor` — full scan ~4× faster — closes #1
+- fix: `datetime.utcnow()` → `datetime.now(timezone.utc)` — closes #3
+- fix: CVE plugin reports network failures as `INFO` finding — closes #6
+- feat: plugins run in parallel via `ThreadPoolExecutor` (~4× faster) — closes #1
 
 ---
 
