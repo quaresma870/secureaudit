@@ -93,3 +93,20 @@ trivy:
   timeout: 180
   scan_images: false     # set true + 'image: name:tag' to scan a built image
   # image: myapp:latest
+
+# ── Baseline & suppressions ───────────────────────────────────────────────────
+#
+# Accept existing findings so they don't reappear on every scan:
+#   secureaudit baseline .
+# Creates .secureaudit-baseline.json — commit this file so the team shares
+# the same accepted-risk baseline. Suppressed findings still show in reports
+# (labelled "baseline"), just excluded from the score.
+#
+# Inline suppression — add a comment on the offending line:
+#   API_KEY = "test-fixture-not-real"  # secureaudit-ignore
+#   API_KEY = "test-fixture-not-real"  # secureaudit-ignore: hardcoded-password
+#   API_KEY = "test-fixture-not-real"  # secureaudit-ignore: hardcoded-password reason="test fixture"
+#   API_KEY = "test-fixture-not-real"  # secureaudit-ignore: hardcoded-password until=2026-12-31
+#
+# The 'until' date forces re-review — after that date the finding becomes
+# active again instead of being silenced forever.
