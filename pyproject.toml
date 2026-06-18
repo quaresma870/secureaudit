@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "secureaudit"
+version = "1.0.0"
+description = "Multi-plugin security audit tool"
+requires-python = ">=3.11"
+dependencies = ["click>=8.1.0", "rich>=13.7.0", "pyyaml>=6.0.1"]
+
+[project.scripts]
+secureaudit = "secureaudit.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]

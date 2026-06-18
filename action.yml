@@ -1,0 +1,71 @@
+name: SecureAudit
+description: Run a security audit on your repository and fail if score is below threshold
+author: quaresma870
+
+inputs:
+  target:
+    description: Directory to audit
+    default: "."
+    required: false
+  plugins:
+    description: Comma-separated list of plugins (default: all)
+    default: "secrets,cve,filesystem,policy"
+    required: false
+  fail-below:
+    description: Fail if security score is below this value (0-100)
+    default: "70"
+    required: false
+  output-html:
+    description: Path to write HTML report (optional)
+    default: ""
+    required: false
+  output-json:
+    description: Path to write JSON report (optional)
+    default: ""
+    required: false
+
+outputs:
+  score:
+    description: Security score (0-100)
+    value: ${{ steps.audit.outputs.score }}
+  grade:
+    description: Security grade (A-F)
+    value: ${{ steps.audit.outputs.grade }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install SecureAudit
+      shell: bash
+      run: pip install click rich pyyaml
+
+    - name: Run SecureAudit
+      id: audit
+      shell: bash
+      run: |
+        ARGS="--plugins ${{ inputs.plugins }} --fail-below ${{ inputs.fail-below }}"
+        if [ -n "${{ inputs.output-html }}" ]; then ARGS="$ARGS --output ${{ inputs.output-html }}"; fi
+        if [ -n "${{ inputs.output-json }}" ]; then ARGS="$ARGS --json ${{ inputs.output-json }}"; fi
+
+        # Run and capture output
+        PYTHONPATH=${{ github.action_path }} python3 -m secureaudit.cli scan \
+          "${{ inputs.target }}" $ARGS 2>&1 | tee /tmp/secureaudit-output.txt
+        EXIT_CODE=${PIPESTATUS[0]}
+
+        # Extract score from JSON if available
+        if [ -n "${{ inputs.output-json }}" ] && [ -f "${{ inputs.output-json }}" ]; then
+          SCORE=$(python3 -c "import json; print(json.load(open('${{ inputs.output-json }}'))['score'])" 2>/dev/null || echo "0")
+          GRADE=$(python3 -c "import json; print(json.load(open('${{ inputs.output-json }}'))['grade'])" 2>/dev/null || echo "F")
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "grade=$GRADE" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit $EXIT_CODE
+
+    - name: Upload HTML report
+      if: inputs.output-html != '' && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: secureaudit-report
+        path: ${{ inputs.output-html }}
+        retention-days: 30

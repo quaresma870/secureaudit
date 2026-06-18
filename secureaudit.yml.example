@@ -1,0 +1,66 @@
+# SecureAudit configuration
+# Place this file at the root of your project as secureaudit.yml
+
+# Plugins to run (comment out to disable)
+plugins:
+  - secrets
+  - cve
+  - filesystem
+  - http
+  - network
+  - policy
+
+# Fail CI if score drops below this
+fail_below: 70
+
+# Paths to exclude from scanning
+exclude_paths:
+  - .git
+  - node_modules
+  - .venv
+  - __pycache__
+  - dist
+  - build
+  - .terraform
+
+# ── Plugin configuration ──────────────────────────────────────────────────────
+
+secrets:
+  exclude_extensions:
+    - .png
+    - .jpg
+    - .gif
+    - .svg
+    - .pdf
+    - .zip
+  max_file_size_kb: 512
+
+cve:
+  ecosystems:
+    - PyPI
+    - npm
+    - Go
+  fail_on_severity:
+    - CRITICAL
+    - HIGH
+
+http:
+  timeout: 10
+  urls:
+    - https://example.com   # add your URLs here
+  ssl_expiry_warning_days: 30
+
+network:
+  hosts:
+    - example.com           # add your hosts here
+  ports: [21, 22, 23, 80, 443, 3306, 5432, 6379]
+  timeout: 2
+
+policy:
+  ssl_expiry_warning_days: 30
+
+report:
+  output_dir: ./secureaudit-reports
+  formats:
+    - html
+    - json
