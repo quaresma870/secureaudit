@@ -43,7 +43,7 @@ def cli():
 @click.option("--json", "json_out", default=None, help="Write JSON report to file")
 @click.option("--fail-below", default=None, type=int, help="Exit 1 if score below threshold")
 @click.option("--no-terminal", is_flag=True, help="Suppress terminal output")
-def scan(target, config, plugins, output, json_out, fail_below, no_terminal):
+def scan(target, config, plugins, output, json_out, fail_below, no_terminal, sarif_out, db):
     """Run a security audit on TARGET (default: current directory)."""
 
     cfg = load_config(config or Path(target) / "secureaudit.yml")
@@ -72,6 +72,16 @@ def scan(target, config, plugins, output, json_out, fail_below, no_terminal):
         from secureaudit.reports.json_report import write_json
         write_json(result, json_out)
         console.print(f"[green]✔[/green] JSON report: [bold]{json_out}[/bold]")
+
+    if sarif_out:
+        from secureaudit.reports.sarif import write_sarif
+        write_sarif(result, sarif_out)
+        console.print(f"[green]✔[/green] SARIF report: [bold]{sarif_out}[/bold]")
+
+    if db:
+        from secureaudit.reports.history import save
+        run_id = save(result, db)
+        console.print(f"[green]✔[/green] Saved to [bold]{db}[/bold] (run #{run_id})")
 
     if result.score < threshold:
         console.print(f"\n[bold red]✘ Score {result.score} is below threshold {threshold}. Failing.[/bold red]\n")
@@ -161,6 +171,25 @@ def _print_result(result, threshold: int) -> None:
         console.print(t2)
     else:
         console.print("[green]  No significant findings.[/green]\n")
+
+
+
+@cli.command()
+@click.option("--db", default="audits.db", show_default=True,
+              help="SQLite database with audit history.")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8080, show_default=True)
+def serve(db, host, port):
+    """Start the web dashboard for audit history."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]uvicorn is required: pip install uvicorn[/red]")
+        sys.exit(1)
+    from secureaudit.dashboard.app import create_app
+    console.print(f"[bold cyan]🔐 SecureAudit Dashboard[/bold cyan] → http://{host}:{port}")
+    app = create_app(db)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 def main():
