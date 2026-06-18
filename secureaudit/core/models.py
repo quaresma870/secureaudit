@@ -5,7 +5,7 @@ Core data models — shared across all plugins and reports.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -100,7 +100,7 @@ class AuditResult:
     """Aggregated result of a full audit run."""
 
     target: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     plugin_results: list[PluginResult] = field(default_factory=list)
     duration_ms: float = 0.0
 

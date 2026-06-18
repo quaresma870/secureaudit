@@ -100,6 +100,16 @@ class CVEPlugin(BasePlugin):
         vulnerabilities = self._query_osv(packages)
 
         for pkg_name, pkg_ver, ecosystem, vulns in vulnerabilities:
+            # Special case: network error sentinel
+            if pkg_name == "_network_error":
+                result.findings.append(Finding(
+                    plugin=self.name,
+                    title="CVE check skipped — network unavailable",
+                    severity=Severity.INFO,
+                    description=vulns[0].get("summary", "Could not reach OSV.dev API."),
+                    remediation="Ensure network access to api.osv.dev or run the CVE check manually.",
+                ))
+                continue
             for vuln in vulns:
                 vuln_id = vuln.get("id", "UNKNOWN")
                 summary = vuln.get("summary", "No description available")
@@ -172,6 +182,6 @@ class CVEPlugin(BasePlugin):
                     results.append((name, ver, eco, vulns))
             return results
 
-        except Exception:
-            # Network unavailable or API error — return empty (don't fail the audit)
-            return []
+        except Exception as e:
+            # Network unavailable or API error — report as INFO, don't silently pass
+            return [("_network_error", "", "unknown", [{"id": "NETWORK_ERROR", "summary": f"OSV.dev unreachable: {e}", "references": []}])]
