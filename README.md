@@ -34,6 +34,9 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 | `policy` | `.gitignore` completeness, Dockerfile USER, unpinned deps, CI hardening |
 | `cors` | CORS misconfiguration — origin reflection, wildcard + credentials, null origin |
 | `git_history` | Git history scan — secrets committed and later removed |
+| `sast` | Static code analysis via Semgrep — SQLi, command injection, SSRF, etc. (opt-in) |
+| `malware` | Known malware signatures via ClamAV — supply-chain attacks (opt-in) |
+| `trivy` | Container/filesystem CVEs + IaC misconfig via Trivy (opt-in) |
 
 ---
 
@@ -176,6 +179,15 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.4
+- feat: SAST plugin via Semgrep (`sast`) — closes #13
+  (3000+ OWASP Top 10 rules, runs entirely locally, graceful degradation if not installed)
+- feat: malware scanning via ClamAV (`malware`) — closes #14
+  (scans node_modules/.venv/uploads for known malware signatures, stale definitions warning)
+- feat: container + IaC scanning via Trivy (`trivy`) — closes #15
+  (broader ecosystem than OSV.dev: Cargo/Composer/NuGet; Dockerfile/K8s/Terraform misconfig)
+- chore: `cors` and `git_history` added to default plugin list
 
 ### v1.0.3
 - feat: CORS misconfiguration plugin (`cors`) — closes #7

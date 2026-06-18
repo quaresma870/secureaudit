@@ -9,6 +9,12 @@ plugins:
   - http
   - network
   - policy
+  - cors
+  - git_history
+  # Opt-in (require external binaries — see docs):
+  # - sast        # requires: pip install semgrep
+  # - malware     # requires: apt install clamav
+  # - trivy       # requires: https://aquasecurity.github.io/trivy/
 
 # Fail CI if score drops below this
 fail_below: 70
@@ -64,3 +70,26 @@ report:
   formats:
     - html
     - json
+
+cors:
+  urls:
+    - https://api.example.com   # add your API URLs here
+
+git_history:
+  since_days: 90
+  max_commits: 200
+  max_findings: 50
+
+sast:
+  config: auto          # or "p/owasp-top-ten", "p/security-audit"
+  timeout: 120
+
+malware:
+  scan_dirs: [node_modules, .venv, vendor, uploads, dist, build]
+  max_file_size_mb: 50
+  max_definition_age_days: 7
+
+trivy:
+  timeout: 180
+  scan_images: false     # set true + 'image: name:tag' to scan a built image
+  # image: myapp:latest
