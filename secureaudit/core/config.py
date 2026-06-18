@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 _DEFAULTS: dict[str, Any] = {
-    "plugins": ["secrets", "cve", "filesystem", "http", "network", "policy"],
+    "plugins": ["secrets", "cve", "filesystem", "http", "network", "policy", "cors", "git_history"],
     "fail_below": 70,
     "exclude_paths": [".git", "node_modules", ".venv", "__pycache__", "dist", "build"],
     "secrets": {
@@ -33,6 +33,25 @@ _DEFAULTS: dict[str, Any] = {
     },
     "policy": {
         "ssl_expiry_warning_days": 30,
+    },
+    "git_history": {
+        "since_days": 90,
+        "max_commits": 200,
+        "max_findings": 50,
+    },
+    "sast": {
+        "config": "auto",
+        "timeout": 120,
+    },
+    "malware": {
+        "scan_dirs": ["node_modules", ".venv", "venv", "vendor", "uploads", "dist", "build"],
+        "max_file_size_mb": 50,
+        "max_definition_age_days": 7,
+        "timeout": 120,
+    },
+    "trivy": {
+        "timeout": 180,
+        "scan_images": False,
     },
     "report": {
         "output_dir": "./secureaudit-reports",

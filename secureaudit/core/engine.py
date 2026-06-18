@@ -23,6 +23,9 @@ _PLUGIN_MODULES = [
     "secureaudit.plugins.policy",
     "secureaudit.plugins.cors",
     "secureaudit.plugins.git_history",
+    "secureaudit.plugins.sast",
+    "secureaudit.plugins.malware",
+    "secureaudit.plugins.trivy",
 ]
 
 

@@ -99,6 +99,11 @@ def list_plugins():
         "http": "HTTP security headers, SSL/TLS, redirects",
         "network": "Port scan for exposed services",
         "policy": ".gitignore completeness, Dockerfile security, CI hardening",
+        "cors": "CORS misconfiguration — origin reflection, wildcard + credentials",
+        "git_history": "Scan git history for secrets removed from working tree",
+        "sast": "Static code analysis for vulnerability patterns (requires semgrep)",
+        "malware": "Known malware signature scanning (requires clamav)",
+        "trivy": "Container/filesystem CVEs + IaC misconfig (requires trivy)",
     }
     for name in available_plugins():
         desc = descriptions.get(name, "")

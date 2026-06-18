@@ -335,3 +335,95 @@ class TestScheduler:
         from secureaudit.scheduler import _parse_cron
         with pytest.raises((ValueError, RuntimeError)):
             _parse_cron("not a cron", lambda: None)
+
+
+# ── SAST Plugin ───────────────────────────────────────────────────────────────
+
+class TestSASTPlugin:
+    def setup_method(self):
+        from secureaudit.plugins.sast import SASTPlugin
+        self.plugin = SASTPlugin(load_config(None))
+
+    def test_graceful_degradation_when_semgrep_missing(self, monkeypatch):
+        import shutil
+        monkeypatch.setattr(shutil, "which", lambda x: None)
+        with tempfile.TemporaryDirectory() as d:
+            result = self.plugin.audit(d)
+            assert len(result.findings) == 1
+            assert result.findings[0].severity == Severity.INFO
+            assert "not installed" in result.findings[0].title.lower()
+
+    def test_registered(self):
+        from secureaudit.plugins import available_plugins
+        assert "sast" in available_plugins()
+
+
+# ── Malware Plugin ────────────────────────────────────────────────────────────
+
+class TestMalwarePlugin:
+    def setup_method(self):
+        from secureaudit.plugins.malware import MalwarePlugin
+        self.plugin = MalwarePlugin(load_config(None))
+
+    def test_graceful_degradation_when_clamav_missing(self, monkeypatch):
+        import shutil
+        monkeypatch.setattr(shutil, "which", lambda x: None)
+        with tempfile.TemporaryDirectory() as d:
+            result = self.plugin.audit(d)
+            assert len(result.findings) == 1
+            assert result.findings[0].severity == Severity.INFO
+            assert "not installed" in result.findings[0].title.lower()
+
+    def test_no_scan_dirs_present(self, monkeypatch):
+        import shutil
+        monkeypatch.setattr(shutil, "which", lambda x: "/usr/bin/clamscan" if x == "clamscan" else None)
+        with tempfile.TemporaryDirectory() as d:
+            result = self.plugin.audit(d)
+            assert any("No scannable directories" in f.title for f in result.findings)
+
+    def test_registered(self):
+        from secureaudit.plugins import available_plugins
+        assert "malware" in available_plugins()
+
+
+# ── Trivy Plugin ──────────────────────────────────────────────────────────────
+
+class TestTrivyPlugin:
+    def setup_method(self):
+        from secureaudit.plugins.trivy import TrivyPlugin
+        self.plugin = TrivyPlugin(load_config(None))
+
+    def test_graceful_degradation_when_trivy_missing(self, monkeypatch):
+        import shutil
+        monkeypatch.setattr(shutil, "which", lambda x: None)
+        with tempfile.TemporaryDirectory() as d:
+            result = self.plugin.audit(d)
+            assert len(result.findings) == 1
+            assert result.findings[0].severity == Severity.INFO
+            assert "not installed" in result.findings[0].title.lower()
+
+    def test_registered(self):
+        from secureaudit.plugins import available_plugins
+        assert "trivy" in available_plugins()
+
+
+# ── Default plugins config ───────────────────────────────────────────────────
+
+class TestNewPluginsConfig:
+    def test_cors_and_git_history_in_defaults(self):
+        cfg = load_config(None)
+        assert "cors" in cfg.plugins
+        assert "git_history" in cfg.plugins
+
+    def test_sast_malware_trivy_not_in_defaults(self):
+        """These require external binaries — opt-in only, not run by default."""
+        cfg = load_config(None)
+        assert "sast" not in cfg.plugins
+        assert "malware" not in cfg.plugins
+        assert "trivy" not in cfg.plugins
+
+    def test_all_new_plugins_available(self):
+        from secureaudit.plugins import available_plugins
+        plugins = available_plugins()
+        for name in ("cors", "git_history", "sast", "malware", "trivy"):
+            assert name in plugins, f"{name} should be registered"
