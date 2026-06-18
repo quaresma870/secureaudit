@@ -192,6 +192,47 @@ def serve(db, host, port):
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
+
+@cli.command()
+@click.argument("target", default=".", type=click.Path(exists=True))
+@click.option("--cron", required=True,
+              help='Cron expression e.g. "*/30 * * * *" or "0 6 * * 1".')
+@click.option("--config", "-c", default=None, help="Path to secureaudit.yml")
+@click.option("--plugins", "-p", default=None,
+              help="Comma-separated plugins (default: all)")
+@click.option("--db", default=None, help="SQLite database for history.")
+@click.option("--alert-webhook", default=None,
+              help="Webhook URL — only called on score regression.")
+@click.option("--fail-below", default=70, show_default=True,
+              help="Alert if score drops below this threshold.")
+@click.option("--output-dir", default=None,
+              help="Directory to write HTML reports per run.")
+def schedule(target, cron, config, plugins, db, alert_webhook, fail_below, output_dir):
+    """Run security audits on a cron schedule.
+
+    Runs immediately on start, then repeats per cron expression.
+    Alerts only when score drops (regression detection — no false positives on stable repos).
+    """
+    try:
+        import schedule as _s  # noqa: F401
+    except ImportError:
+        console.print("[red]Install schedule: pip install schedule[/red]")
+        sys.exit(1)
+
+    from secureaudit.scheduler import run_schedule
+    plugin_list = [p.strip() for p in plugins.split(",")] if plugins else None
+    run_schedule(
+        target=target,
+        cron_expr=cron,
+        plugins=plugin_list,
+        db=db,
+        alert_webhook=alert_webhook,
+        fail_below=fail_below,
+        output_dir=output_dir,
+        config_path=config,
+    )
+
+
 def main():
     cli()
 

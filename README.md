@@ -32,6 +32,8 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 | `http` | Security headers (HSTS, CSP, X-Frame-Options…), SSL expiry, redirects |
 | `network` | Open ports — database, telnet, VNC, Redis exposed to internet |
 | `policy` | `.gitignore` completeness, Dockerfile USER, unpinned deps, CI hardening |
+| `cors` | CORS misconfiguration — origin reflection, wildcard + credentials, null origin |
+| `git_history` | Git history scan — secrets committed and later removed |
 
 ---
 
@@ -61,6 +63,9 @@ PYTHONPATH=. python -m secureaudit.cli scan . --output report.html --json report
 
 # Fail if score below 80
 PYTHONPATH=. python -m secureaudit.cli scan . --fail-below 80
+
+# Scheduled audit (weekly, alert on regression)
+PYTHONPATH=. python -m secureaudit.cli schedule . --cron "0 6 * * 1" --db audits.db --alert-webhook URL
 
 # List available plugins
 PYTHONPATH=. python -m secureaudit.cli list-plugins
@@ -171,6 +176,14 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.3
+- feat: CORS misconfiguration plugin (`cors`) — closes #7
+  (origin reflection, wildcard + credentials, null origin — maps to OWASP)
+- feat: git history secret scanner plugin (`git_history`) — closes #8
+  (scans commit diffs for secrets removed from working tree; reports commit SHA + author)
+- feat: `secureaudit schedule` — scheduled audit mode — closes #9
+  (cron expression, regression detection — only alerts on score drop)
 
 ### v1.0.2
 - feat: SARIF 2.1.0 output (`--sarif results.sarif`) for GitHub Security tab — closes #2

@@ -8,6 +8,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from secureaudit.core.config import load_config
 from secureaudit.core.engine import AuditEngine
 from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
@@ -239,3 +241,97 @@ class TestEngine:
             assert "score" in data
             assert "plugins" in data
             assert isinstance(data["plugins"], list)
+
+
+# ── CORS Plugin ───────────────────────────────────────────────────────────────
+
+class TestCORSPlugin:
+    def setup_method(self):
+        from secureaudit.plugins.cors import CORSPlugin
+        self.plugin = CORSPlugin(load_config(None))
+
+    def test_no_urls_returns_info(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.plugin.audit(d)
+            assert len(result.findings) == 1
+            assert result.findings[0].severity == Severity.INFO
+            assert "No URLs" in result.findings[0].title
+
+    def test_registered(self):
+        from secureaudit.plugins import available_plugins
+        assert "cors" in available_plugins()
+
+
+# ── Git History Plugin ────────────────────────────────────────────────────────
+
+class TestGitHistoryPlugin:
+    def setup_method(self):
+        from secureaudit.plugins.git_history import GitHistoryPlugin
+        self.plugin = GitHistoryPlugin(load_config(None))
+
+    def test_non_git_dir_returns_info(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.plugin.audit(d)
+            assert len(result.findings) == 1
+            assert result.findings[0].severity == Severity.INFO
+            assert "Not a git" in result.findings[0].title
+
+    def test_git_repo_scans_history(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            # Init a git repo with a secret in history
+            subprocess.run(["git", "init"], cwd=d, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=d, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=d, capture_output=True)
+
+            # Commit a secret
+            secret_file = Path(d) / "config.py"
+            secret_file.write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            subprocess.run(["git", "add", "."], cwd=d, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "add config"], cwd=d, capture_output=True)
+
+            # Remove the secret (but it's still in history)
+            secret_file.write_text('AWS_KEY = os.environ["AWS_KEY"]\n')
+            subprocess.run(["git", "add", "."], cwd=d, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "fix secret"], cwd=d, capture_output=True)
+
+            result = self.plugin.audit(d)
+            # Should find the secret in history
+            critical = [f for f in result.findings if f.severity == Severity.CRITICAL]
+            assert len(critical) >= 1
+            assert any("AWS" in f.title for f in critical)
+
+    def test_registered(self):
+        from secureaudit.plugins import available_plugins
+        assert "git_history" in available_plugins()
+
+
+# ── Scheduler ─────────────────────────────────────────────────────────────────
+
+class TestScheduler:
+    def test_parse_cron_every_30min(self):
+        from secureaudit.scheduler import _parse_cron
+        try:
+            import schedule
+        except ImportError:
+            pytest.skip("schedule not installed")
+        schedule.clear()
+        job = _parse_cron("*/30 * * * *", lambda: None)
+        assert job is not None
+        schedule.clear()
+
+    def test_parse_cron_daily(self):
+        from secureaudit.scheduler import _parse_cron
+        try:
+            import schedule
+        except ImportError:
+            pytest.skip("schedule not installed")
+        schedule.clear()
+        job = _parse_cron("0 8 * * *", lambda: None)
+        assert job is not None
+        schedule.clear()
+
+    def test_invalid_cron_raises(self):
+        from secureaudit.scheduler import _parse_cron
+        with pytest.raises((ValueError, RuntimeError)):
+            _parse_cron("not a cron", lambda: None)

@@ -21,6 +21,8 @@ _PLUGIN_MODULES = [
     "secureaudit.plugins.http_headers",
     "secureaudit.plugins.network",
     "secureaudit.plugins.policy",
+    "secureaudit.plugins.cors",
+    "secureaudit.plugins.git_history",
 ]
 
 
