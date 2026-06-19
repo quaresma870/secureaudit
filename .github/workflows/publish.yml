@@ -1,0 +1,56 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-and-publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write   # required for PyPI trusted publishing (OIDC) — no token stored
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PYPROJECT_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "Tag v$TAG_VERSION does not match pyproject.toml version $PYPROJECT_VERSION"
+            exit 1
+          fi
+          echo "Version verified: $TAG_VERSION"
+
+      - name: Install build tooling
+        run: pip install build
+
+      - name: Build distribution
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: |
+          pip install twine
+          twine check dist/*
+
+      # Trusted publishing (OIDC) — no PYPI_API_TOKEN secret needed.
+      # Configure this once at https://pypi.org/manage/project/secureaudit/settings/publishing/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

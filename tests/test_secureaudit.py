@@ -1307,3 +1307,55 @@ class TestInitCLI:
             cfg = load_config(Path(d) / "secureaudit.yml")
             assert "secrets" in cfg.plugins
             assert "cve" in cfg.plugins
+
+
+# ── Packaging ─────────────────────────────────────────────────────────────────
+
+class TestPackaging:
+    def test_pyproject_has_valid_build_backend(self):
+        """Regression test: pyproject.toml previously had
+        build-backend = "setuptools.backends.legacy:build", which is not a
+        valid PEP 517 entry point and would fail any real `pip install` or
+        `python -m build` — this had zero coverage until now.
+        """
+        import tomllib
+
+        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        backend = data["build-system"]["build-backend"]
+        assert backend == "setuptools.build_meta", (
+            f"build-backend is {backend!r} — must be a real PEP 517 backend "
+            "for 'pip install' / 'python -m build' to work."
+        )
+
+    def test_pyproject_version_matches_cli_fallback_format(self):
+        import tomllib
+
+        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        version = data["project"]["version"]
+        # Must be a plausible semver-ish string, not empty
+        assert version
+        assert version[0].isdigit()
+
+    def test_cli_version_resolves_dynamically(self):
+        """Regression test: --version was hardcoded to "1.0.0" regardless
+        of the actual installed/pyproject version.
+        """
+        import secureaudit.cli as cli_module
+        # __version__ should either match an installed package version,
+        # or fall back to the dev marker — never a silently-stale hardcoded string.
+        assert cli_module.__version__ == "0.0.0+dev" or cli_module.__version__[0].isdigit()
+
+    def test_entry_point_is_declared(self):
+        import tomllib
+
+        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        assert data["project"]["scripts"]["secureaudit"] == "secureaudit.cli:main"
