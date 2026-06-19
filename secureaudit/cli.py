@@ -37,6 +37,83 @@ def cli():
 
 @cli.command()
 @click.argument("target", default=".", type=click.Path(exists=True))
+@click.option("--yes", "-y", is_flag=True, help="Skip interactive prompts; auto-detect only.")
+@click.option("--force", is_flag=True, help="Overwrite an existing secureaudit.yml.")
+@click.option("--baseline/--no-baseline", default=None,
+              help="Create a baseline immediately after writing config. Prompts if not set.")
+def init(target, yes, force, baseline):
+    """Interactive setup wizard — detects your stack and writes a tailored secureaudit.yml."""
+    from secureaudit.core.init import build_config, detect_project, write_config
+
+    target_path = Path(target)
+    config_path = target_path / "secureaudit.yml"
+
+    if config_path.exists() and not force:
+        console.print(f"[yellow]{config_path} already exists.[/yellow] Use --force to overwrite.")
+        sys.exit(1)
+
+    console.print()
+    console.rule("[bold cyan]🔐 SecureAudit Setup[/bold cyan]")
+    console.print(f"\n[dim]Scanning project structure in[/dim] [green]{target}[/green]...\n")
+
+    detection = detect_project(target_path)
+
+    if detection["languages"]:
+        console.print(f"  [green]✔[/green] Detected: {', '.join(detection['languages'])}")
+    else:
+        console.print("  [yellow]⚠[/yellow]  No recognised dependency manifest found")
+    if detection["has_dockerfile"]:
+        console.print("  [green]✔[/green] Dockerfile found → enabling trivy (container/IaC scan)")
+    if detection["has_git"]:
+        console.print("  [green]✔[/green] Git repository found → enabling git_history")
+
+    urls: list[str] = []
+    hosts: list[str] = []
+
+    if not yes:
+        console.print()
+        if click.confirm("Do you have live URLs to check (HTTP headers, CORS)?", default=False):
+            raw = click.prompt("Enter URLs, comma-separated")
+            urls = [u.strip() for u in raw.split(",") if u.strip()]
+
+        if click.confirm("Do you have hosts to check for exposed ports?", default=False):
+            raw = click.prompt("Enter hosts, comma-separated")
+            hosts = [h.strip() for h in raw.split(",") if h.strip()]
+
+    config = build_config(detection, urls=urls or None, hosts=hosts or None)
+    write_config(config_path, config)
+
+    console.print(f"\n[green]✔[/green] Config written: [bold]{config_path}[/bold]")
+    console.print(f"  Plugins enabled: {', '.join(config['plugins'])}\n")
+
+    do_baseline = baseline
+    if do_baseline is None:
+        do_baseline = yes or click.confirm(
+            "Create a baseline now? (accepts current findings so day one isn't noisy)",
+            default=True,
+        )
+
+    if do_baseline:
+        from secureaudit.core.baseline import default_baseline_path, save_baseline
+        from secureaudit.core.config import load_config as _load_cfg
+        from secureaudit.core.engine import AuditEngine
+
+        console.print("\n[dim]Running initial scan to build baseline...[/dim]")
+        cfg = _load_cfg(config_path)
+        engine = AuditEngine(cfg)
+        result = engine.run(target_path)
+        bpath = default_baseline_path(target_path)
+        count = save_baseline(bpath, result.all_findings, str(target_path))
+        console.print(f"[green]✔[/green] Baseline saved: [bold]{bpath}[/bold] ({count} finding(s) accepted)")
+
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print("  [cyan]secureaudit scan .[/cyan]              — run a scan")
+    console.print("  [cyan]secureaudit pre-commit install[/cyan]  — block commits with secrets")
+    console.print()
+
+
+@cli.command()
+@click.argument("target", default=".", type=click.Path(exists=True))
 @click.option("--config", "-c", default=None, help="Path to secureaudit.yml")
 @click.option("--plugins", "-p", default=None, help="Comma-separated list of plugins to run")
 @click.option("--output", "-o", default=None, help="Write HTML report to file")
