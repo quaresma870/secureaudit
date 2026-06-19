@@ -339,6 +339,59 @@ def schedule(target, cron, config, plugins, db, alert_webhook, fail_below, outpu
     )
 
 
+@cli.group(name="pre-commit")
+def pre_commit_group():
+    """Manage the git pre-commit hook that blocks commits containing secrets."""
+
+
+@pre_commit_group.command(name="install")
+@click.option("--force", is_flag=True, help="Overwrite an existing pre-commit hook.")
+def pre_commit_install(force):
+    """Install the secrets-scanning pre-commit hook in the current git repository."""
+    from secureaudit.core.precommit import get_git_root, install_hook
+
+    root = get_git_root()
+    if root is None:
+        console.print("[red]Not inside a git repository.[/red]")
+        sys.exit(1)
+
+    ok, msg = install_hook(root, force=force)
+    if ok:
+        console.print(f"[green]✔[/green] Installed: [bold]{msg}[/bold]")
+        console.print("[dim]Staged files are scanned for secrets before each commit.[/dim]\n")
+    else:
+        console.print(f"[red]{msg}[/red]")
+        sys.exit(1)
+
+
+@pre_commit_group.command(name="uninstall")
+def pre_commit_uninstall():
+    """Remove the secureaudit pre-commit hook."""
+    from secureaudit.core.precommit import get_git_root, uninstall_hook
+
+    root = get_git_root()
+    if root is None:
+        console.print("[red]Not inside a git repository.[/red]")
+        sys.exit(1)
+
+    ok, msg = uninstall_hook(root)
+    if ok:
+        console.print(f"[green]✔[/green] Removed: [bold]{msg}[/bold]")
+    else:
+        console.print(f"[yellow]{msg}[/yellow]")
+
+
+@pre_commit_group.command(name="run")
+def pre_commit_run():
+    """Internal — invoked by the installed git hook. Scans staged files for secrets."""
+    from secureaudit.core.precommit import get_git_root, run_staged_scan
+
+    root = get_git_root()
+    if root is None:
+        sys.exit(0)  # not a git repo somehow — never block on our own confusion
+    sys.exit(run_staged_scan(root))
+
+
 def _print_diff(result) -> None:
     console.print()
     console.rule(f"[bold cyan]Diff: run #{result.run1_id} → run #{result.run2_id}[/bold cyan]")

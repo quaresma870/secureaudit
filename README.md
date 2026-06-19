@@ -79,6 +79,9 @@ PYTHONPATH=. python -m secureaudit.cli scan .
 # Compare two runs — what changed?
 PYTHONPATH=. python -m secureaudit.cli diff previous latest --db audits.db
 
+# Install a pre-commit hook — blocks commits containing secrets
+PYTHONPATH=. python -m secureaudit.cli pre-commit install
+
 # List available plugins
 PYTHONPATH=. python -m secureaudit.cli list-plugins
 ```
@@ -188,6 +191,14 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.7
+- feat: pre-commit hook — `secureaudit pre-commit install` — closes #24
+  - Scans only staged files (fast — typically <1s, no full-repo walk)
+  - Blocks commit if a CRITICAL/HIGH secret is detected, with clear remediation guidance
+  - `secureaudit pre-commit uninstall` removes it cleanly; refuses to touch hooks it didn't install
+  - `.pre-commit-hooks.yaml` published for compatibility with the [pre-commit framework](https://pre-commit.com)
+  - `git commit --no-verify` documented as the (discouraged) override
 
 ### v1.0.6
 - feat: `secureaudit diff <run1> <run2> --db audits.db` — closes #17

@@ -1,0 +1,25 @@
+# Compatibility manifest for the pre-commit framework (https://pre-commit.com).
+#
+# Usage in a consumer repo's .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/quaresma870/secureaudit
+#       rev: v1.0.7   # pin to a released tag
+#       hooks:
+#         - id: secureaudit-secrets
+#
+# Then: pre-commit install && pre-commit run --all-files
+#
+# This is independent of `secureaudit pre-commit install` (our own native
+# git hook installer) — use whichever fits your existing workflow. If you
+# already use the pre-commit framework for other hooks, this integrates
+# alongside them.
+
+- id: secureaudit-secrets
+  name: SecureAudit — secrets scan
+  description: Blocks commits containing exposed API keys, tokens, and passwords.
+  entry: secureaudit pre-commit run
+  language: python
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]

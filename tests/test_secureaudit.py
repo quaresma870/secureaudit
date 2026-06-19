@@ -902,3 +902,203 @@ class TestDiffCLI:
             data = _json.loads(result.output)
             assert "new" in data
             assert "resolved" in data
+
+
+# ── Pre-commit hook ───────────────────────────────────────────────────────────
+
+def _init_git_repo(d: str) -> None:
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=d, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=d, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=d, capture_output=True)
+
+
+def _git_stage(d: str, *files: str) -> None:
+    import subprocess
+    subprocess.run(["git", "add", *files], cwd=d, capture_output=True)
+
+
+class TestPrecommitHookManagement:
+    def test_get_git_root_in_repo(self):
+        from secureaudit.core.precommit import get_git_root
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            root = get_git_root(Path(d))
+            assert root is not None
+            assert Path(d).resolve() == root.resolve()
+
+    def test_get_git_root_outside_repo(self):
+        from secureaudit.core.precommit import get_git_root
+        with tempfile.TemporaryDirectory() as d:
+            # No git init — should return None (or a root above /tmp, but never error)
+            result = get_git_root(Path(d))
+            # Either None or some parent repo — must not raise
+            assert result is None or isinstance(result, Path)
+
+    def test_install_hook_creates_executable_file(self):
+        from secureaudit.core.precommit import install_hook
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            ok, path = install_hook(Path(d))
+            assert ok
+            hook_path = Path(path)
+            assert hook_path.exists()
+            assert hook_path.stat().st_mode & 0o111  # executable bits set
+
+    def test_install_hook_fails_without_git_dir(self):
+        from secureaudit.core.precommit import install_hook
+        with tempfile.TemporaryDirectory() as d:
+            ok, msg = install_hook(Path(d))
+            assert not ok
+            assert "Not a git repository" in msg
+
+    def test_install_hook_refuses_to_overwrite_foreign_hook(self):
+        from secureaudit.core.precommit import install_hook
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            hooks_dir = Path(d) / ".git" / "hooks"
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            (hooks_dir / "pre-commit").write_text("#!/bin/sh\necho 'existing hook'\n")
+
+            ok, msg = install_hook(Path(d))
+            assert not ok
+            assert "already exists" in msg
+
+    def test_install_hook_force_overwrites(self):
+        from secureaudit.core.precommit import install_hook
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            hooks_dir = Path(d) / ".git" / "hooks"
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            (hooks_dir / "pre-commit").write_text("#!/bin/sh\necho 'existing hook'\n")
+
+            ok, _ = install_hook(Path(d), force=True)
+            assert ok
+
+    def test_uninstall_removes_our_hook(self):
+        from secureaudit.core.precommit import install_hook, uninstall_hook
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            install_hook(Path(d))
+            ok, _ = uninstall_hook(Path(d))
+            assert ok
+            assert not (Path(d) / ".git" / "hooks" / "pre-commit").exists()
+
+    def test_uninstall_refuses_foreign_hook(self):
+        from secureaudit.core.precommit import uninstall_hook
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            hooks_dir = Path(d) / ".git" / "hooks"
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            (hooks_dir / "pre-commit").write_text("#!/bin/sh\necho 'not ours'\n")
+
+            ok, msg = uninstall_hook(Path(d))
+            assert not ok
+            assert "not" in msg.lower()
+
+    def test_uninstall_no_hook_present(self):
+        from secureaudit.core.precommit import uninstall_hook
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            ok, msg = uninstall_hook(Path(d))
+            assert not ok
+            assert "No pre-commit hook" in msg
+
+
+class TestStagedFileScanning:
+    def test_get_staged_files_empty_when_nothing_staged(self):
+        from secureaudit.core.precommit import get_staged_files
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            assert get_staged_files(Path(d)) == []
+
+    def test_get_staged_files_returns_staged_paths(self):
+        from secureaudit.core.precommit import get_staged_files
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            Path(d, "app.py").write_text("print('hello')\n")
+            _git_stage(d, "app.py")
+
+            staged = get_staged_files(Path(d))
+            assert len(staged) == 1
+            assert staged[0].name == "app.py"
+
+    def test_run_staged_scan_passes_clean_files(self):
+        from secureaudit.core.precommit import run_staged_scan
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            _git_stage(d, "app.py")
+
+            assert run_staged_scan(Path(d)) == 0
+
+    def test_run_staged_scan_blocks_on_secret(self, capsys):
+        from secureaudit.core.precommit import run_staged_scan
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            Path(d, "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            _git_stage(d, "config.py")
+
+            exit_code = run_staged_scan(Path(d))
+            assert exit_code == 1
+            captured = capsys.readouterr()
+            assert "blocked" in captured.out.lower()
+
+    def test_run_staged_scan_no_staged_files(self):
+        from secureaudit.core.precommit import run_staged_scan
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            # Nothing staged at all
+            assert run_staged_scan(Path(d)) == 0
+
+    def test_run_staged_scan_does_not_apply_inline_suppressions(self):
+        """Documents current behaviour: the pre-commit hook is intentionally
+        minimal and fast — it scans staged files directly via SecretsPlugin
+        and does not currently parse inline 'secureaudit-ignore' comments.
+        """
+        from secureaudit.core.precommit import run_staged_scan
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            Path(d, "config.py").write_text(
+                'AWS_KEY = "AKIAI9ABCDEF1234WXYZ"  # secureaudit-ignore\n'
+            )
+            _git_stage(d, "config.py")
+            assert run_staged_scan(Path(d)) == 1
+
+
+class TestPrecommitCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_install_and_uninstall_via_cli(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            import os
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                r1 = runner.invoke(cli, ["pre-commit", "install"])
+                assert r1.exit_code == 0, r1.output
+                assert (Path(d) / ".git" / "hooks" / "pre-commit").exists()
+
+                r2 = runner.invoke(cli, ["pre-commit", "uninstall"])
+                assert r2.exit_code == 0, r2.output
+                assert not (Path(d) / ".git" / "hooks" / "pre-commit").exists()
+            finally:
+                os.chdir(old_cwd)
+
+    def test_install_outside_git_repo_fails(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            import os
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                result = runner.invoke(cli, ["pre-commit", "install"])
+                assert result.exit_code != 0
+            finally:
+                os.chdir(old_cwd)
