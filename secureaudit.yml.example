@@ -110,3 +110,11 @@ trivy:
 #
 # The 'until' date forces re-review — after that date the finding becomes
 # active again instead of being silenced forever.
+
+# ── Notifications ──────────────────────────────────────────────────────────
+#
+# Slack/Teams are passed as CLI flags, not config (webhook URLs are secrets):
+#   secureaudit scan . --alert-slack https://hooks.slack.com/services/...
+#   secureaudit scan . --alert-teams https://outlook.office.com/webhook/...
+#   secureaudit schedule . --cron "0 6 * * 1" --alert-slack URL --dashboard-url https://...
+#   secureaudit digest . --db audits.db --slack-webhook URL --days 7

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import sys
+from datetime import UTC
 from pathlib import Path
 
 import click
@@ -132,9 +133,13 @@ def init(target, yes, force, baseline):
               help="Path to baseline file (default: <target>/.secureaudit-baseline.json if present)")
 @click.option("--no-baseline", is_flag=True, help="Ignore baseline file even if present")
 @click.option("--no-inline-suppress", is_flag=True, help="Ignore inline 'secureaudit-ignore' comments")
+@click.option("--alert-slack", default=None, help="Slack incoming webhook URL — sends a Block Kit summary")
+@click.option("--alert-teams", default=None, help="Teams incoming webhook URL — sends an Adaptive Card summary")
+@click.option("--dashboard-url", default=None, help="Link included in Slack/Teams messages (e.g. dashboard run URL)")
 def scan(
     target, config, plugins, output, json_out, sarif_out, db, fail_below,
     no_terminal, baseline_file, no_baseline, no_inline_suppress,
+    alert_slack, alert_teams, dashboard_url,
 ):
     """Run a security audit on TARGET (default: current directory)."""
 
@@ -186,6 +191,18 @@ def scan(
         from secureaudit.reports.sarif import write_sarif
         write_sarif(result, sarif_out)
         console.print(f"[green]✔[/green] SARIF report: [bold]{sarif_out}[/bold]")
+
+    if alert_slack:
+        from secureaudit.notifications import send_slack
+        ok = send_slack(alert_slack, result, dashboard_url)
+        console.print("[green]✔[/green] Slack notification sent" if ok
+                      else "[yellow]⚠  Slack notification failed[/yellow]")
+
+    if alert_teams:
+        from secureaudit.notifications import send_teams
+        ok = send_teams(alert_teams, result, dashboard_url)
+        console.print("[green]✔[/green] Teams notification sent" if ok
+                      else "[yellow]⚠  Teams notification failed[/yellow]")
 
     if db:
         from secureaudit.reports.history import save
@@ -391,12 +408,21 @@ def serve(db, host, port):
               help="Comma-separated plugins (default: all)")
 @click.option("--db", default=None, help="SQLite database for history.")
 @click.option("--alert-webhook", default=None,
-              help="Webhook URL — only called on score regression.")
+              help="Generic webhook URL — only called on score regression.")
+@click.option("--alert-slack", default=None,
+              help="Slack incoming webhook URL — Block Kit summary, only on regression.")
+@click.option("--alert-teams", default=None,
+              help="Teams incoming webhook URL — Adaptive Card summary, only on regression.")
+@click.option("--dashboard-url", default=None,
+              help="Link included in Slack/Teams alerts (e.g. dashboard run URL).")
 @click.option("--fail-below", default=70, show_default=True,
               help="Alert if score drops below this threshold.")
 @click.option("--output-dir", default=None,
               help="Directory to write HTML reports per run.")
-def schedule(target, cron, config, plugins, db, alert_webhook, fail_below, output_dir):
+def schedule(
+    target, cron, config, plugins, db, alert_webhook, alert_slack, alert_teams,
+    dashboard_url, fail_below, output_dir,
+):
     """Run security audits on a cron schedule.
 
     Runs immediately on start, then repeats per cron expression.
@@ -416,10 +442,52 @@ def schedule(target, cron, config, plugins, db, alert_webhook, fail_below, outpu
         plugins=plugin_list,
         db=db,
         alert_webhook=alert_webhook,
+        alert_slack=alert_slack,
+        alert_teams=alert_teams,
+        dashboard_url=dashboard_url,
         fail_below=fail_below,
         output_dir=output_dir,
         config_path=config,
     )
+
+
+@cli.command()
+@click.argument("target", default=".", type=click.Path(exists=True))
+@click.option("--db", required=True, help="SQLite database with audit history.")
+@click.option("--days", default=7, show_default=True, help="Number of days to summarise.")
+@click.option("--slack-webhook", default=None, help="Slack incoming webhook URL for the digest.")
+def digest(target, db, days, slack_webhook):
+    """Send a weekly (or N-day) digest summarising recent scan history.
+
+    Designed to be run on its own schedule (e.g. a weekly cron job calling
+    this command), separate from the per-run regression alerts in `schedule`.
+    """
+    from datetime import datetime, timedelta
+
+    from secureaudit.reports.history import get_runs
+
+    if not Path(db).exists():
+        console.print(f"[red]Database not found: {db}[/red]")
+        sys.exit(1)
+
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    all_runs = get_runs(db, limit=200)
+    runs = [r for r in all_runs if r["target"] == target]
+    runs = [r for r in runs if datetime.fromisoformat(r["timestamp"]) >= cutoff] or runs[:1]
+
+    if not slack_webhook:
+        console.print("[yellow]No --slack-webhook provided — printing digest instead.[/yellow]\n")
+        for r in runs[:5]:
+            console.print(f"  #{r['id']}  {r['timestamp'][:16]}  score={r['score']} grade={r['grade']}")
+        return
+
+    from secureaudit.notifications import send_slack_digest
+    ok = send_slack_digest(slack_webhook, runs, target)
+    if ok:
+        console.print(f"[green]✔[/green] Digest sent ({len(runs)} run(s) over the last {days} days)")
+    else:
+        console.print("[yellow]⚠  Digest send failed[/yellow]")
+        sys.exit(1)
 
 
 @cli.group(name="pre-commit")

@@ -1359,3 +1359,224 @@ class TestPackaging:
             data = tomllib.load(f)
 
         assert data["project"]["scripts"]["secureaudit"] == "secureaudit.cli:main"
+
+
+# ── Notifications (Slack / Teams) ────────────────────────────────────────────
+
+def _make_result_with_findings(target: str = "/tmp/test") -> AuditResult:
+    result = AuditResult(target=target)
+    pr = PluginResult(plugin="secrets")
+    pr.findings = [
+        Finding(plugin="secrets", title="AWS Access Key detected", severity=Severity.CRITICAL,
+               description="desc", file="app.py", line=12),
+        Finding(plugin="policy", title="Missing .gitignore entry", severity=Severity.MEDIUM,
+               description="desc", file=".gitignore"),
+    ]
+    result.plugin_results = [pr]
+    return result
+
+
+class TestScoreColorHelpers:
+    def test_green_at_90_and_above(self):
+        from secureaudit.notifications import score_color_hex, score_color_name, score_emoji
+        assert score_color_hex(90) == "#22c55e"
+        assert score_color_hex(100) == "#22c55e"
+        assert score_color_name(95) == "good"
+        assert score_emoji(90) == "🟢"
+
+    def test_yellow_between_60_and_89(self):
+        from secureaudit.notifications import score_color_hex, score_color_name
+        assert score_color_hex(60) == "#f59e0b"
+        assert score_color_hex(89) == "#f59e0b"
+        assert score_color_name(75) == "warning"
+
+    def test_red_below_60(self):
+        from secureaudit.notifications import score_color_hex, score_color_name, score_emoji
+        assert score_color_hex(59) == "#ef4444"
+        assert score_color_hex(0) == "#ef4444"
+        assert score_color_name(10) == "attention"
+        assert score_emoji(0) == "🔴"
+
+
+class TestSlackPayload:
+    def test_payload_structure(self):
+        from secureaudit.notifications import build_slack_payload
+        result = _make_result_with_findings()
+        payload = build_slack_payload(result)
+
+        assert "attachments" in payload
+        attachment = payload["attachments"][0]
+        assert "color" in attachment
+        assert "blocks" in attachment
+        # Must not be raw JSON dumped as text — must use Block Kit structure
+        assert isinstance(attachment["blocks"], list)
+        assert attachment["blocks"][0]["type"] == "header"
+
+    def test_payload_includes_score_and_grade(self):
+        from secureaudit.notifications import build_slack_payload
+        result = _make_result_with_findings()
+        payload = build_slack_payload(result)
+        blocks_text = str(payload)
+        assert str(result.score) in blocks_text
+        assert result.grade in blocks_text
+
+    def test_payload_includes_top_findings(self):
+        from secureaudit.notifications import build_slack_payload
+        result = _make_result_with_findings()
+        payload = build_slack_payload(result)
+        blocks_text = str(payload)
+        assert "AWS Access Key detected" in blocks_text
+
+    def test_payload_includes_dashboard_button_when_url_given(self):
+        from secureaudit.notifications import build_slack_payload
+        result = _make_result_with_findings()
+        payload = build_slack_payload(result, dashboard_url="https://dash.example.com/run/1")
+        blocks = payload["attachments"][0]["blocks"]
+        action_blocks = [b for b in blocks if b["type"] == "actions"]
+        assert len(action_blocks) == 1
+        assert action_blocks[0]["elements"][0]["url"] == "https://dash.example.com/run/1"
+
+    def test_no_dashboard_button_without_url(self):
+        from secureaudit.notifications import build_slack_payload
+        result = _make_result_with_findings()
+        payload = build_slack_payload(result)
+        blocks = payload["attachments"][0]["blocks"]
+        assert not any(b["type"] == "actions" for b in blocks)
+
+    def test_color_matches_score(self):
+        from secureaudit.notifications import build_slack_payload, score_color_hex
+        result = AuditResult(target="/tmp/clean")  # no findings -> score 100
+        payload = build_slack_payload(result)
+        assert payload["attachments"][0]["color"] == score_color_hex(100)
+
+
+class TestTeamsPayload:
+    def test_payload_structure(self):
+        from secureaudit.notifications import build_teams_payload
+        result = _make_result_with_findings()
+        payload = build_teams_payload(result)
+
+        assert payload["type"] == "message"
+        attachment = payload["attachments"][0]
+        assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
+        card = attachment["content"]
+        assert card["type"] == "AdaptiveCard"
+        assert "body" in card
+
+    def test_payload_includes_score_and_grade(self):
+        from secureaudit.notifications import build_teams_payload
+        result = _make_result_with_findings()
+        payload = build_teams_payload(result)
+        card_text = str(payload)
+        assert str(result.score) in card_text
+        assert result.grade in card_text
+
+    def test_payload_includes_top_findings(self):
+        from secureaudit.notifications import build_teams_payload
+        result = _make_result_with_findings()
+        payload = build_teams_payload(result)
+        assert "AWS Access Key detected" in str(payload)
+
+    def test_action_open_url_when_dashboard_given(self):
+        from secureaudit.notifications import build_teams_payload
+        result = _make_result_with_findings()
+        payload = build_teams_payload(result, dashboard_url="https://dash.example.com/run/1")
+        card = payload["attachments"][0]["content"]
+        assert card["actions"][0]["type"] == "Action.OpenUrl"
+        assert card["actions"][0]["url"] == "https://dash.example.com/run/1"
+
+    def test_no_actions_key_without_dashboard_url(self):
+        from secureaudit.notifications import build_teams_payload
+        result = _make_result_with_findings()
+        payload = build_teams_payload(result)
+        card = payload["attachments"][0]["content"]
+        assert "actions" not in card
+
+
+class TestSlackDigest:
+    def test_empty_runs(self):
+        from secureaudit.notifications import build_slack_digest
+        payload = build_slack_digest([], "/tmp/test")
+        assert "text" in payload
+
+    def test_digest_shows_trend(self):
+        from secureaudit.notifications import build_slack_digest
+        runs = [
+            {"score": 95, "grade": "A", "critical_high": 0},
+            {"score": 80, "grade": "B", "critical_high": 2},
+        ]
+        payload = build_slack_digest(runs, "/tmp/test")
+        text = str(payload)
+        assert "improved" in text
+        assert "95" in text
+
+    def test_digest_regressed_trend(self):
+        from secureaudit.notifications import build_slack_digest
+        runs = [
+            {"score": 70, "grade": "C", "critical_high": 3},
+            {"score": 90, "grade": "A", "critical_high": 0},
+        ]
+        payload = build_slack_digest(runs, "/tmp/test")
+        assert "regressed" in str(payload)
+
+
+class TestNotificationSending:
+    def test_send_slack_handles_unreachable_url(self):
+        from secureaudit.notifications import send_slack
+        result = _make_result_with_findings()
+        ok = send_slack("http://localhost:1/nonexistent", result)
+        assert ok is False  # never raises, just returns False
+
+    def test_send_teams_handles_unreachable_url(self):
+        from secureaudit.notifications import send_teams
+        result = _make_result_with_findings()
+        ok = send_teams("http://localhost:1/nonexistent", result)
+        assert ok is False
+
+
+class TestNotificationCLIIntegration:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_scan_with_alert_slack_does_not_crash(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "policy", "--no-terminal",
+                "--alert-slack", "http://localhost:1/unreachable",
+                "--fail-below", "0",
+            ])
+            assert result.exit_code == 0, result.output
+
+    def test_scan_with_alert_teams_does_not_crash(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "policy", "--no-terminal",
+                "--alert-teams", "http://localhost:1/unreachable",
+                "--fail-below", "0",
+            ])
+            assert result.exit_code == 0, result.output
+
+    def test_digest_command_without_webhook_prints(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_audit_result(d, []), db)
+
+            result = runner.invoke(cli, ["digest", d, "--db", db, "--days", "7"])
+            assert result.exit_code == 0, result.output
+
+    def test_digest_command_missing_db(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["digest", "/tmp", "--db", "/nonexistent/audits.db"])
+        assert result.exit_code != 0

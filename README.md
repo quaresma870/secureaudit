@@ -106,6 +106,12 @@ secureaudit schedule . --cron "0 6 * * 1" --db audits.db --alert-webhook URL
 # Install a pre-commit hook — blocks commits containing secrets
 secureaudit pre-commit install
 
+# Send a Slack alert with the scan summary
+secureaudit scan . --alert-slack https://hooks.slack.com/services/...
+
+# Weekly digest to Slack (run via your own cron, separate from `schedule`)
+secureaudit digest . --db audits.db --slack-webhook https://hooks.slack.com/services/...
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -215,6 +221,18 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.1.0
+- feat: native Slack notifications (`--alert-slack <webhook>`) — closes #21
+  - Block Kit formatting: score, grade, severity counts, top 3 findings, colour-coded sidebar
+  - Optional "View full report" button via `--dashboard-url`
+- feat: native Microsoft Teams notifications (`--alert-teams <webhook>`) — closes #21
+  - Equivalent Adaptive Card rendering
+- feat: weekly digest mode — `secureaudit digest . --db audits.db --slack-webhook URL` — closes #21
+  - Summarises N days of history: latest score/grade, 7-day trend, run count
+- Colour coding (both platforms): 🟢 green ≥90, 🟡 yellow 60-89, 🔴 red <60
+- `secureaudit schedule` now accepts `--alert-slack`/`--alert-teams` alongside the
+  existing generic `--alert-webhook` — all fire only on score regression
 
 ### v1.0.9
 - feat: published to PyPI — `pip install secureaudit` — closes #18
