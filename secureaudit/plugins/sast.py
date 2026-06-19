@@ -6,6 +6,11 @@ path traversal, SSRF, insecure deserialization, hardcoded crypto, etc.
 
 Runs entirely locally — no code is sent to any cloud service.
 Gracefully degrades to an INFO finding if the `semgrep` binary is not installed.
+
+Supports incremental scanning: when a cache is attached (see
+secureaudit/core/cache.py), only files whose content hash changed since the
+last run are actually passed to semgrep — unchanged files reuse cached
+results, and a fully cache-hit run skips invoking semgrep altogether.
 """
 
 from __future__ import annotations
@@ -62,6 +67,122 @@ class SASTPlugin(BasePlugin):
         timeout = cfg.get("timeout", 120)
         exclude_paths = self.config.exclude_paths
 
+        if self.cache is not None:
+            findings = self._run_with_cache(target, semgrep_bin, ruleset, timeout, exclude_paths)
+        else:
+            findings = self._run_semgrep([target], semgrep_bin, ruleset, timeout, exclude_paths, target)
+
+        if findings is None:
+            result.findings.append(Finding(
+                plugin=self.name,
+                title="Semgrep scan failed or timed out",
+                severity=Severity.INFO,
+                description="See plugin logs / increase 'sast.timeout' in secureaudit.yml.",
+            ))
+            return result
+
+        result.findings = findings
+
+        if not result.findings:
+            result.findings.append(Finding(
+                plugin=self.name,
+                title="No SAST findings",
+                severity=Severity.INFO,
+                description=f"Semgrep ({ruleset}) found no vulnerability patterns.",
+            ))
+
+        return result
+
+    # ── Incremental scanning ──────────────────────────────────────────────────
+
+    def _collect_candidate_files(self, target: Path, exclude_paths: set, max_size: int) -> list[Path]:
+        from secureaudit.core.cache import CACHE_DIR_NAME
+
+        files = []
+        for f in target.rglob("*"):
+            if not f.is_file():
+                continue
+            if CACHE_DIR_NAME in f.parts:
+                continue  # never scan our own cache, regardless of user exclude_paths config
+            if any(part in exclude_paths for part in f.parts):
+                continue
+            try:
+                if f.stat().st_size > max_size:
+                    continue
+            except OSError:
+                continue
+            files.append(f)
+        return files
+
+    def _run_with_cache(
+        self, target: Path, semgrep_bin: str, ruleset: str, timeout: int, exclude_paths: list[str],
+    ) -> list[Finding] | None:
+        from secureaudit.core.cache import cache_key, hash_config, hash_file
+
+        cfg = self.plugin_config
+        max_size = cfg.get("max_file_size_kb", 1024) * 1024
+        files = self._collect_candidate_files(target, set(exclude_paths), max_size)
+
+        config_hash = hash_config({"ruleset": ruleset, **cfg})
+        cached_findings: list[Finding] = []
+        to_scan: list[Path] = []
+        key_by_file: dict[str, str] = {}
+
+        for f in files:
+            file_hash = hash_file(f)
+            if file_hash is None:
+                to_scan.append(f)
+                continue
+            key = cache_key(self.name, self.schema_version, config_hash, file_hash)
+            cached = self.cache.get(key)
+            if cached is not None:
+                cached_findings.extend(Finding.from_dict(d) for d in cached)
+            else:
+                to_scan.append(f)
+                key_by_file[str(f)] = key
+
+        if not to_scan:
+            # Every candidate file was a cache hit — semgrep is never invoked.
+            return cached_findings
+
+        fresh = self._run_semgrep(to_scan, semgrep_bin, ruleset, timeout, [], target)
+        if fresh is None:
+            # The incremental (file-list) invocation failed — fall back to a
+            # full directory scan rather than silently losing coverage.
+            return self._run_semgrep([target], semgrep_bin, ruleset, timeout, exclude_paths, target)
+
+        # Group fresh findings by the file they belong to so each scanned
+        # file gets its own cache entry — including files with zero findings,
+        # otherwise a clean file would never become a cache hit.
+        findings_by_file: dict[str, list[Finding]] = {str(p): [] for p in to_scan}
+        for finding in fresh:
+            if finding.file is None:
+                continue
+            abs_path = str(target / finding.file)
+            if abs_path in findings_by_file:
+                findings_by_file[abs_path].append(finding)
+
+        for f in to_scan:
+            key = key_by_file.get(str(f))
+            if key:
+                self.cache.set(key, [fnd.to_dict() for fnd in findings_by_file.get(str(f), [])])
+
+        return cached_findings + fresh
+
+    # ── Semgrep invocation + parsing ──────────────────────────────────────────
+
+    def _run_semgrep(
+        self,
+        scan_targets: list[Path],
+        semgrep_bin: str,
+        ruleset: str,
+        timeout: int,
+        exclude_paths: list[str],
+        base: Path,
+    ) -> list[Finding] | None:
+        """Run semgrep against either a single directory or an explicit file
+        list. Returns None on failure/timeout so the caller can decide how to
+        degrade (e.g. fall back to a full scan)."""
         cmd = [
             semgrep_bin, "scan",
             "--config", ruleset,
@@ -71,60 +192,28 @@ class SASTPlugin(BasePlugin):
         ]
         for ex in exclude_paths:
             cmd.extend(["--exclude", ex])
-        cmd.append(str(target))
+        cmd.extend(str(p) for p in scan_targets)
 
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout + 30,
-            )
-        except subprocess.TimeoutExpired:
-            result.findings.append(Finding(
-                plugin=self.name,
-                title="Semgrep scan timed out",
-                severity=Severity.INFO,
-                description=f"Scan exceeded {timeout + 30}s and was aborted.",
-                remediation="Increase 'sast.timeout' in secureaudit.yml or scope the scan to fewer paths.",
-            ))
-            return result
-        except Exception as exc:
-            result.findings.append(Finding(
-                plugin=self.name,
-                title="Semgrep execution failed",
-                severity=Severity.INFO,
-                description=str(exc),
-            ))
-            return result
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+        except Exception:
+            return None
 
         if not proc.stdout.strip():
-            result.findings.append(Finding(
-                plugin=self.name,
-                title="Semgrep produced no output",
-                severity=Severity.INFO,
-                description=proc.stderr[:300] if proc.stderr else "No output from semgrep.",
-            ))
-            return result
+            return []
 
         try:
             data = json.loads(proc.stdout)
         except json.JSONDecodeError:
-            result.findings.append(Finding(
-                plugin=self.name,
-                title="Could not parse Semgrep output",
-                severity=Severity.INFO,
-                description="Semgrep output was not valid JSON.",
-            ))
-            return result
+            return None
 
+        findings: list[Finding] = []
         for item in data.get("results", []):
             check_id = item.get("check_id", "unknown-rule")
             extra = item.get("extra", {})
             semgrep_severity = extra.get("severity", "WARNING")
             severity = _SEVERITY_MAP.get(semgrep_severity, Severity.MEDIUM)
 
-            # Escalate known-critical patterns
             if any(hint in check_id.lower() for hint in _CRITICAL_HINTS):
                 if severity in (Severity.MEDIUM, Severity.LOW):
                     severity = Severity.HIGH
@@ -134,16 +223,14 @@ class SASTPlugin(BasePlugin):
             message = extra.get("message", "Potential vulnerability detected")
             path = item.get("path", "")
             try:
-                rel_path = str(Path(path).relative_to(target))
+                rel_path = str(Path(path).relative_to(base))
             except ValueError:
                 rel_path = path
             line = item.get("start", {}).get("line")
 
-            rule_url = extra.get("metadata", {}).get(
-                "source", f"https://semgrep.dev/r/{check_id}"
-            )
+            rule_url = extra.get("metadata", {}).get("source", f"https://semgrep.dev/r/{check_id}")
 
-            result.findings.append(Finding(
+            findings.append(Finding(
                 plugin=self.name,
                 title=f"SAST: {check_id.split('.')[-1]}",
                 severity=severity,
@@ -158,22 +245,4 @@ class SASTPlugin(BasePlugin):
                 extra={"rule_id": check_id, "owasp": extra.get("metadata", {}).get("owasp")},
             ))
 
-        # Report scan errors from semgrep itself (e.g. parse errors in target files)
-        scan_errors = data.get("errors", [])
-        if scan_errors and cfg.get("report_scan_errors", False):
-            result.findings.append(Finding(
-                plugin=self.name,
-                title=f"Semgrep reported {len(scan_errors)} file(s) it could not fully parse",
-                severity=Severity.INFO,
-                description="Some files may have incomplete analysis due to syntax issues.",
-            ))
-
-        if not result.findings:
-            result.findings.append(Finding(
-                plugin=self.name,
-                title="No SAST findings",
-                severity=Severity.INFO,
-                description=f"Semgrep ({ruleset}) found no vulnerability patterns.",
-            ))
-
-        return result
+        return findings

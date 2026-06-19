@@ -80,56 +80,68 @@ class PolicyPlugin(BasePlugin):
         return findings
 
     def _check_dockerfile(self, target: Path) -> list[Finding]:
-        findings = []
         dockerfiles = list(target.rglob("Dockerfile")) + list(target.rglob("Dockerfile.*"))
         exclude_paths = set(self.config.exclude_paths)
+        from secureaudit.core.cache import CACHE_DIR_NAME
+        candidates = [
+            df for df in dockerfiles
+            if CACHE_DIR_NAME not in df.parts and not any(part in exclude_paths for part in df.parts)
+        ]
 
-        for df in dockerfiles:
-            if any(part in exclude_paths for part in df.parts):
-                continue
-            content = df.read_text(errors="ignore")
-            lines = content.splitlines()
-            rel = str(df.relative_to(target))
+        if self.cache is not None:
+            from secureaudit.core.cache import scan_with_cache
+            return scan_with_cache(self, candidates, lambda f: self._check_dockerfile_one(f, target))
 
-            # Running as root
-            has_user = any(line.strip().upper().startswith("USER ") for line in lines)
-            if not has_user:
+        findings = []
+        for df in candidates:
+            findings.extend(self._check_dockerfile_one(df, target))
+        return findings
+
+    def _check_dockerfile_one(self, df: Path, target: Path) -> list[Finding]:
+        findings = []
+        content = df.read_text(errors="ignore")
+        lines = content.splitlines()
+        rel = str(df.relative_to(target))
+
+        # Running as root
+        has_user = any(line.strip().upper().startswith("USER ") for line in lines)
+        if not has_user:
+            findings.append(Finding(
+                plugin=self.name,
+                title=f"Dockerfile runs as root: {rel}",
+                severity=Severity.HIGH,
+                description="No USER instruction found — container runs as root.",
+                file=rel,
+                remediation="Add 'USER nonroot' or create a dedicated user in your Dockerfile.",
+                reference="https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user",
+            ))
+
+        # Pinned base image
+        from_lines = [ln.strip() for ln in lines if ln.strip().upper().startswith("FROM ")]
+        for from_line in from_lines:
+            if ":latest" in from_line or (
+                ":" not in from_line.split()[-1] and "@" not in from_line
+            ):
                 findings.append(Finding(
                     plugin=self.name,
-                    title=f"Dockerfile runs as root: {rel}",
-                    severity=Severity.HIGH,
-                    description="No USER instruction found — container runs as root.",
+                    title=f"Unpinned base image: {rel}",
+                    severity=Severity.MEDIUM,
+                    description=f"'{from_line}' uses latest or unpinned tag — builds may be unreproducible.",
                     file=rel,
-                    remediation="Add 'USER nonroot' or create a dedicated user in your Dockerfile.",
-                    reference="https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user",
+                    evidence=from_line,
+                    remediation="Pin to a specific version: e.g. 'FROM python:3.11.9-slim'",
                 ))
 
-            # Pinned base image
-            from_lines = [ln.strip() for ln in lines if ln.strip().upper().startswith("FROM ")]
-            for from_line in from_lines:
-                if ":latest" in from_line or (
-                    ":" not in from_line.split()[-1] and "@" not in from_line
-                ):
-                    findings.append(Finding(
-                        plugin=self.name,
-                        title=f"Unpinned base image: {rel}",
-                        severity=Severity.MEDIUM,
-                        description=f"'{from_line}' uses latest or unpinned tag — builds may be unreproducible.",
-                        file=rel,
-                        evidence=from_line,
-                        remediation="Pin to a specific version: e.g. 'FROM python:3.11.9-slim'",
-                    ))
-
-            # ADD vs COPY
-            if re.search(r"^\s*ADD\s+(?!http)", content, re.MULTILINE):
-                findings.append(Finding(
-                    plugin=self.name,
-                    title=f"ADD used instead of COPY: {rel}",
-                    severity=Severity.LOW,
-                    description="ADD has implicit behaviours (tar extraction, URL fetching). Prefer COPY.",
-                    file=rel,
-                    remediation="Replace ADD with COPY for local files.",
-                ))
+        # ADD vs COPY
+        if re.search(r"^\s*ADD\s+(?!http)", content, re.MULTILINE):
+            findings.append(Finding(
+                plugin=self.name,
+                title=f"ADD used instead of COPY: {rel}",
+                severity=Severity.LOW,
+                description="ADD has implicit behaviours (tar extraction, URL fetching). Prefer COPY.",
+                file=rel,
+                remediation="Replace ADD with COPY for local files.",
+            ))
 
         return findings
 
@@ -165,36 +177,47 @@ class PolicyPlugin(BasePlugin):
 
     def _check_ci_security(self, target: Path) -> list[Finding]:
         """Check GitHub Actions workflows for security issues."""
-        findings = []
         workflows_dir = target / ".github" / "workflows"
         if not workflows_dir.exists():
-            return findings
+            return []
 
-        for wf in workflows_dir.glob("*.yml"):
-            content = wf.read_text(errors="ignore")
-            rel = str(wf.relative_to(target))
+        workflow_files = list(workflows_dir.glob("*.yml"))
 
-            # Secrets in env (not via secrets context)
-            if re.search(r"env:\s*\n(?:\s+\w+:\s*(?!.*\$\{\{).*\n)*\s+\w+:\s*['\"]?[A-Za-z0-9_]{16,}", content):
+        if self.cache is not None:
+            from secureaudit.core.cache import scan_with_cache
+            return scan_with_cache(self, workflow_files, lambda f: self._check_ci_security_one(f, target))
+
+        findings = []
+        for wf in workflow_files:
+            findings.extend(self._check_ci_security_one(wf, target))
+        return findings
+
+    def _check_ci_security_one(self, wf: Path, target: Path) -> list[Finding]:
+        findings = []
+        content = wf.read_text(errors="ignore")
+        rel = str(wf.relative_to(target))
+
+        # Secrets in env (not via secrets context)
+        if re.search(r"env:\s*\n(?:\s+\w+:\s*(?!.*\$\{\{).*\n)*\s+\w+:\s*['\"]?[A-Za-z0-9_]{16,}", content):
+            findings.append(Finding(
+                plugin=self.name,
+                title=f"Possible hardcoded value in CI: {wf.name}",
+                severity=Severity.MEDIUM,
+                description="Workflow may contain hardcoded secrets in env block.",
+                file=rel,
+                remediation="Use ${{ secrets.MY_SECRET }} instead of hardcoded values.",
+            ))
+
+        # pull_request_target with checkout of PR code (dangerous)
+        if "pull_request_target" in content and "actions/checkout" in content:
+            if "ref" in content and "head" in content:
                 findings.append(Finding(
                     plugin=self.name,
-                    title=f"Possible hardcoded value in CI: {wf.name}",
-                    severity=Severity.MEDIUM,
-                    description="Workflow may contain hardcoded secrets in env block.",
+                    title=f"Dangerous pull_request_target in {wf.name}",
+                    severity=Severity.HIGH,
+                    description="pull_request_target + checkout of PR head ref can allow secret exfiltration.",
                     file=rel,
-                    remediation="Use ${{ secrets.MY_SECRET }} instead of hardcoded values.",
+                    reference="https://securitylab.github.com/research/github-actions-preventing-pwn-requests/",
                 ))
-
-            # pull_request_target with checkout of PR code (dangerous)
-            if "pull_request_target" in content and "actions/checkout" in content:
-                if "ref" in content and "head" in content:
-                    findings.append(Finding(
-                        plugin=self.name,
-                        title=f"Dangerous pull_request_target in {wf.name}",
-                        severity=Severity.HIGH,
-                        description="pull_request_target + checkout of PR head ref can allow secret exfiltration.",
-                        file=rel,
-                        reference="https://securitylab.github.com/research/github-actions-preventing-pwn-requests/",
-                    ))
 
         return findings

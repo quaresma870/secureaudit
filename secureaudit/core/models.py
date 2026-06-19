@@ -92,6 +92,28 @@ class Finding:
             "suppressed_reason": self.suppressed_reason,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Finding:
+        """Reconstruct a Finding from a to_dict()-style mapping.
+
+        Used by the incremental scan cache to deserialise previously stored
+        results. Ignores computed-only keys (fingerprint) since those are
+        derived, not stored state.
+        """
+        return cls(
+            plugin=data["plugin"],
+            title=data["title"],
+            severity=Severity(data["severity"]),
+            description=data.get("description", ""),
+            file=data.get("file"),
+            line=data.get("line"),
+            evidence=data.get("evidence"),
+            remediation=data.get("remediation"),
+            reference=data.get("reference"),
+            extra=data.get("extra") or {},
+            suppressed_reason=data.get("suppressed_reason"),
+        )
+
 
 @dataclass
 class PluginResult:

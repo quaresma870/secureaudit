@@ -17,10 +17,16 @@ class BasePlugin(ABC):
 
     name: str = "base"
     description: str = ""
+    # Bump when a subclass's detection logic changes, to invalidate stale
+    # cache entries from a previous version of the plugin automatically.
+    schema_version: int = 1
 
     def __init__(self, config: Config):
         self.config = config
         self.plugin_config = config.plugin_config(self.name)
+        # Set by AuditEngine when --no-cache is not passed. Plugins that
+        # don't support incremental caching simply never read this.
+        self.cache = None
 
     def run(self, target: str | Path) -> PluginResult:
         """Run the plugin against a target. Catches exceptions gracefully."""
