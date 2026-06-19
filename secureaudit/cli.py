@@ -4,6 +4,7 @@ SecureAudit CLI.
 
 from __future__ import annotations
 
+import importlib.metadata
 import sys
 from pathlib import Path
 
@@ -20,6 +21,11 @@ from secureaudit.plugins import available_plugins
 
 console = Console()
 
+try:
+    __version__ = importlib.metadata.version("secureaudit")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0+dev"  # running from source without pip install -e .
+
 _SEV_COLOR = {
     Severity.CRITICAL: "bold red",
     Severity.HIGH: "red",
@@ -30,7 +36,7 @@ _SEV_COLOR = {
 
 
 @click.group()
-@click.version_option("1.0.0", prog_name="secureaudit")
+@click.version_option(__version__, prog_name="secureaudit")
 def cli():
     """🔐 SecureAudit — multi-plugin security audit tool."""
 

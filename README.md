@@ -43,9 +43,30 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 ## Installation
 
 ```bash
+pip install secureaudit
+```
+
+```bash
+# macOS / Linuxbrew
+brew tap quaresma870/secureaudit
+brew install secureaudit
+```
+
+Optional extras:
+
+```bash
+pip install secureaudit[sast]        # adds semgrep for the sast plugin
+pip install secureaudit[dashboard]   # adds fastapi+uvicorn for `secureaudit serve`
+pip install secureaudit[all]         # everything above
+```
+
+**For contributors** — clone and run from source:
+
+```bash
 git clone https://github.com/quaresma870/secureaudit.git
 cd secureaudit
 pip install -r requirements.txt
+# then use: PYTHONPATH=. python -m secureaudit.cli <command>
 ```
 
 ---
@@ -54,39 +75,39 @@ pip install -r requirements.txt
 
 ### CLI
 
+If installed via `pip`/`brew`, use `secureaudit` directly. Running from a
+source clone instead, prefix every command with `PYTHONPATH=. python -m secureaudit.cli`.
+
 ```bash
-# Scan current directory (all plugins)
-PYTHONPATH=. python -m secureaudit.cli scan .
+# First-time setup — detects your stack, writes secureaudit.yml, creates baseline
+secureaudit init .
+
+# Scan current directory (all plugins) — baseline/inline suppressions applied automatically
+secureaudit scan .
 
 # Specific plugins only
-PYTHONPATH=. python -m secureaudit.cli scan . --plugins secrets,cve,policy
+secureaudit scan . --plugins secrets,cve,policy
 
 # Generate HTML + JSON report
-PYTHONPATH=. python -m secureaudit.cli scan . --output report.html --json report.json
+secureaudit scan . --output report.html --json report.json
 
 # Fail if score below 80
-PYTHONPATH=. python -m secureaudit.cli scan . --fail-below 80
-
-# Scheduled audit (weekly, alert on regression)
-PYTHONPATH=. python -m secureaudit.cli schedule . --cron "0 6 * * 1" --db audits.db --alert-webhook URL
+secureaudit scan . --fail-below 80
 
 # Accept current findings as baseline (run once after initial triage)
-PYTHONPATH=. python -m secureaudit.cli baseline .
-
-# Scan — baseline and inline suppressions applied automatically
-PYTHONPATH=. python -m secureaudit.cli scan .
+secureaudit baseline .
 
 # Compare two runs — what changed?
-PYTHONPATH=. python -m secureaudit.cli diff previous latest --db audits.db
+secureaudit diff previous latest --db audits.db
 
-# First-time setup — detects your stack, writes secureaudit.yml, creates baseline
-PYTHONPATH=. python -m secureaudit.cli init .
+# Scheduled audit (weekly, alert on regression)
+secureaudit schedule . --cron "0 6 * * 1" --db audits.db --alert-webhook URL
 
 # Install a pre-commit hook — blocks commits containing secrets
-PYTHONPATH=. python -m secureaudit.cli pre-commit install
+secureaudit pre-commit install
 
 # List available plugins
-PYTHONPATH=. python -m secureaudit.cli list-plugins
+secureaudit list-plugins
 ```
 
 ### GitHub Action
@@ -194,6 +215,23 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.9
+- feat: published to PyPI — `pip install secureaudit` — closes #18
+  - `.github/workflows/publish.yml` — auto-publish on `v*.*.*` tags via PyPI trusted publishing (OIDC, no stored token)
+  - Optional extras: `secureaudit[sast]`, `secureaudit[dashboard]`, `secureaudit[all]`
+- feat: Homebrew tap — `brew tap quaresma870/secureaudit && brew install secureaudit` — closes #18
+  - New repo: [homebrew-secureaudit](https://github.com/quaresma870/homebrew-secureaudit)
+  - Formula generated with real sha256 hashes for every Python dependency (fetched from PyPI's JSON API)
+  - `bin/update-formula.sh` to bump the formula after each release
+- fix: `pyproject.toml` had an invalid PEP 517 `build-backend`
+  (`setuptools.backends.legacy:build` — not a real backend) that would have
+  broken every `pip install`/`python -m build` attempt; corrected to `setuptools.build_meta`
+  and verified end-to-end (built wheel → installed in clean venv → ran a real scan)
+- fix: `secureaudit --version` was hardcoded to `"1.0.0"` regardless of the actual
+  installed version; now resolves dynamically via `importlib.metadata`
+- ci: added a `build` job that builds the package, runs `twine check`, and smoke-tests
+  the installed CLI in a clean venv on every push — would have caught both bugs above
 
 ### v1.0.8
 - feat: `secureaudit init` — interactive onboarding wizard — closes #19
