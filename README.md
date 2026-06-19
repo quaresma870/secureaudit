@@ -79,6 +79,9 @@ PYTHONPATH=. python -m secureaudit.cli scan .
 # Compare two runs — what changed?
 PYTHONPATH=. python -m secureaudit.cli diff previous latest --db audits.db
 
+# First-time setup — detects your stack, writes secureaudit.yml, creates baseline
+PYTHONPATH=. python -m secureaudit.cli init .
+
 # Install a pre-commit hook — blocks commits containing secrets
 PYTHONPATH=. python -m secureaudit.cli pre-commit install
 
@@ -191,6 +194,15 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.8
+- feat: `secureaudit init` — interactive onboarding wizard — closes #19
+  - Detects language (Python/Node/Go/Rust/PHP/Ruby), Dockerfile, git repo
+  - Enables only relevant plugins: base (secrets/filesystem/policy) + cve if deps found,
+    git_history if git repo, trivy if Dockerfile present
+  - Optionally prompts for URLs (enables http/cors) and hosts (enables network)
+  - `--yes` for non-interactive/CI use; `--force` to overwrite existing config
+  - Offers to create a baseline immediately so day one isn't noisy
 
 ### v1.0.7
 - feat: pre-commit hook — `secureaudit pre-commit install` — closes #24

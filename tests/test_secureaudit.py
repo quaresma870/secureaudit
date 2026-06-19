@@ -1102,3 +1102,208 @@ class TestPrecommitCLI:
                 assert result.exit_code != 0
             finally:
                 os.chdir(old_cwd)
+
+
+# ── Init wizard ───────────────────────────────────────────────────────────────
+
+class TestDetectProject:
+    def test_detects_python_via_requirements(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "requirements.txt").write_text("# no deps\n")
+            detection = detect_project(Path(d))
+            assert "python" in detection["languages"]
+
+    def test_detects_node_via_package_json(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "package.json").write_text("{}\n")
+            detection = detect_project(Path(d))
+            assert "node" in detection["languages"]
+
+    def test_detects_multiple_languages(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "requirements.txt").write_text("\n")
+            Path(d, "go.mod").write_text("module example\n")
+            detection = detect_project(Path(d))
+            assert "python" in detection["languages"]
+            assert "go" in detection["languages"]
+
+    def test_detects_dockerfile(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:3.11\n")
+            detection = detect_project(Path(d))
+            assert detection["has_dockerfile"]
+
+    def test_detects_dockerfile_variant(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile.prod").write_text("FROM python:3.11\n")
+            detection = detect_project(Path(d))
+            assert detection["has_dockerfile"]
+
+    def test_detects_git(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            detection = detect_project(Path(d))
+            assert detection["has_git"]
+
+    def test_no_markers_found(self):
+        from secureaudit.core.init import detect_project
+        with tempfile.TemporaryDirectory() as d:
+            detection = detect_project(Path(d))
+            assert detection["languages"] == []
+            assert not detection["has_dockerfile"]
+            assert not detection["has_git"]
+
+
+class TestBuildConfig:
+    def test_python_repo_with_dockerfile_and_git(self):
+        """Matches the issue's acceptance criteria exactly."""
+        from secureaudit.core.init import build_config
+        detection = {"languages": ["python"], "has_dockerfile": True,
+                     "has_git": True, "has_ci": False}
+        config = build_config(detection)
+        for expected in ("secrets", "cve", "filesystem", "policy", "trivy", "git_history"):
+            assert expected in config["plugins"]
+        assert "http" not in config["plugins"]
+        assert "network" not in config["plugins"]
+        assert "cors" not in config["plugins"]
+
+    def test_bare_repo_minimal_plugins(self):
+        from secureaudit.core.init import build_config
+        detection = {"languages": [], "has_dockerfile": False, "has_git": False, "has_ci": False}
+        config = build_config(detection)
+        assert config["plugins"] == ["secrets", "filesystem", "policy"]
+
+    def test_urls_enable_http_and_cors(self):
+        from secureaudit.core.init import build_config
+        detection = {"languages": [], "has_dockerfile": False, "has_git": False, "has_ci": False}
+        config = build_config(detection, urls=["https://api.example.com"])
+        assert "http" in config["plugins"]
+        assert "cors" in config["plugins"]
+        assert config["http"]["urls"] == ["https://api.example.com"]
+        assert config["cors"]["urls"] == ["https://api.example.com"]
+
+    def test_hosts_enable_network_only(self):
+        from secureaudit.core.init import build_config
+        detection = {"languages": [], "has_dockerfile": False, "has_git": False, "has_ci": False}
+        config = build_config(detection, hosts=["example.com"])
+        assert "network" in config["plugins"]
+        assert "http" not in config["plugins"]
+        assert "cors" not in config["plugins"]
+        assert config["network"]["hosts"] == ["example.com"]
+
+    def test_dockerfile_adds_trivy_config(self):
+        from secureaudit.core.init import build_config
+        detection = {"languages": [], "has_dockerfile": True, "has_git": False, "has_ci": False}
+        config = build_config(detection)
+        assert "trivy" in config["plugins"]
+        assert config["trivy"]["scan_images"] is False
+
+    def test_fail_below_default(self):
+        from secureaudit.core.init import build_config
+        detection = {"languages": [], "has_dockerfile": False, "has_git": False, "has_ci": False}
+        config = build_config(detection)
+        assert config["fail_below"] == 70
+
+
+class TestWriteConfig:
+    def test_writes_valid_yaml_that_loads_back(self):
+        from secureaudit.core.init import build_config, write_config
+
+        with tempfile.TemporaryDirectory() as d:
+            detection = {"languages": ["python"], "has_dockerfile": False,
+                        "has_git": False, "has_ci": False}
+            config = build_config(detection)
+            path = Path(d) / "secureaudit.yml"
+            write_config(path, config)
+
+            assert path.exists()
+            loaded_cfg = load_config(path)
+            assert loaded_cfg.plugins == config["plugins"]
+            assert loaded_cfg.fail_below == 70
+
+    def test_generated_config_works_with_engine(self):
+        """Acceptance criteria: generated secureaudit.yml passes a scan without errors."""
+        from secureaudit.core.init import build_config, write_config
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            Path(target, "app.py").write_text("def hello(): return 'world'\n")
+            detection = {"languages": [], "has_dockerfile": False,
+                        "has_git": False, "has_ci": False}
+            config = build_config(detection)
+            path = target / "secureaudit.yml"
+            write_config(path, config)
+
+            cfg = load_config(path)
+            engine = AuditEngine(cfg)
+            result = engine.run(target)  # must not raise
+            assert result is not None
+
+
+class TestInitCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_init_yes_flag_skips_prompts(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            result = runner.invoke(cli, ["init", d, "--yes"])
+            assert result.exit_code == 0, result.output
+            assert (Path(d) / "secureaudit.yml").exists()
+            # --yes implies baseline creation too
+            assert (Path(d) / ".secureaudit-baseline.json").exists()
+
+    def test_init_no_baseline_flag(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 'world'\n")
+            result = runner.invoke(cli, ["init", d, "--yes", "--no-baseline"])
+            assert result.exit_code == 0, result.output
+            assert (Path(d) / "secureaudit.yml").exists()
+            assert not (Path(d) / ".secureaudit-baseline.json").exists()
+
+    def test_init_refuses_to_overwrite_without_force(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "secureaudit.yml").write_text("plugins: [secrets]\n")
+            result = runner.invoke(cli, ["init", d, "--yes"])
+            assert result.exit_code != 0
+
+    def test_init_force_overwrites(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "secureaudit.yml").write_text("plugins: [secrets]\n")
+            result = runner.invoke(cli, ["init", d, "--yes", "--force", "--no-baseline"])
+            assert result.exit_code == 0, result.output
+
+    def test_init_detects_dockerfile_and_reports_it(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:3.11-slim\nUSER app\n")
+            result = runner.invoke(cli, ["init", d, "--yes", "--no-baseline"])
+            assert result.exit_code == 0
+            assert "trivy" in result.output.lower()
+
+    def test_init_generated_yaml_is_valid(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "requirements.txt").write_text("# placeholder\n")
+            result = runner.invoke(cli, ["init", d, "--yes", "--no-baseline"])
+            assert result.exit_code == 0
+            cfg = load_config(Path(d) / "secureaudit.yml")
+            assert "secrets" in cfg.plugins
+            assert "cve" in cfg.plugins
