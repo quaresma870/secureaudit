@@ -76,6 +76,9 @@ PYTHONPATH=. python -m secureaudit.cli baseline .
 # Scan — baseline and inline suppressions applied automatically
 PYTHONPATH=. python -m secureaudit.cli scan .
 
+# Compare two runs — what changed?
+PYTHONPATH=. python -m secureaudit.cli diff previous latest --db audits.db
+
 # List available plugins
 PYTHONPATH=. python -m secureaudit.cli list-plugins
 ```
@@ -185,6 +188,15 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.0.6
+- feat: `secureaudit diff <run1> <run2> --db audits.db` — closes #17
+  - Matches findings across runs by stable key (plugin + rule + file), immune to line drift
+  - Shows **new**, **resolved**, and unchanged-count
+  - `latest`/`previous` keywords as shortcuts for run IDs
+  - Non-zero exit code when new CRITICAL/HIGH findings are introduced (regression gate)
+  - `--json` for CI consumption (e.g. PR comment bots)
+  - `--include-suppressed` to also diff baselined/inline-suppressed findings
 
 ### v1.0.5
 - feat: baseline command (`secureaudit baseline .`) — accept existing findings as known risk — closes #16
