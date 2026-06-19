@@ -108,12 +108,27 @@ class SecretsPlugin(BasePlugin):
         exclude_paths = set(self.config.exclude_paths)
 
         files = self._collect_files(target, exclude_paths, exclude_exts, max_size)
+        result.findings = self.scan_files(files, target)
+        return result
+
+    def scan_files(self, files: list[Path], base: Path) -> list[Finding]:
+        """Scan an explicit list of files for secrets.
+
+        Public so callers like the pre-commit hook can scan only staged
+        files without paying the cost of a full repository walk.
+        """
+        findings: list[Finding] = []
 
         for file_path in files:
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
+
+            try:
+                rel_path = str(file_path.relative_to(base))
+            except ValueError:
+                rel_path = str(file_path)
 
             for line_num, line in enumerate(content.splitlines(), 1):
                 stripped = line.strip()
@@ -126,19 +141,19 @@ class SecretsPlugin(BasePlugin):
                         # Apply entropy filter only for generic patterns
                         if check_entropy and _shannon_entropy(secret_val) < _ENTROPY_THRESHOLD and len(secret_val) < 32:
                             continue
-                        result.findings.append(Finding(
+                        findings.append(Finding(
                             plugin=self.name,
                             title=f"{name} detected",
                             severity=severity,
-                            description=f"Possible {name} found in {file_path.relative_to(target)}",
-                            file=str(file_path.relative_to(target)),
+                            description=f"Possible {name} found in {rel_path}",
+                            file=rel_path,
                             line=line_num,
                             evidence=line.strip()[:120],
                             remediation=remediation,
                             reference="https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_credentials",
                         ))
 
-        return result
+        return findings
 
     def _collect_files(
         self, target: Path, exclude_paths: set, exclude_exts: set, max_size: int
