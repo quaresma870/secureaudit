@@ -144,6 +144,47 @@ def baseline(target, config, plugins, baseline_file, force):
     console.print("[dim]Future scans will suppress these findings (shown separately, not hidden).[/dim]\n")
 
 
+@cli.command()
+@click.argument("run1")
+@click.argument("run2")
+@click.option("--db", required=True, help="SQLite database with audit history.")
+@click.option("--include-suppressed", is_flag=True,
+              help="Include suppressed findings in the comparison.")
+@click.option("--json", "json_out", is_flag=True, help="Output as JSON instead of a table.")
+def diff(run1, run2, db, include_suppressed, json_out):
+    """Compare findings between two scan runs.
+
+    RUN1 and RUN2 may be numeric run IDs, or the keywords 'latest'/'previous'.
+
+    Examples:
+      secureaudit diff 12 15 --db audits.db
+      secureaudit diff previous latest --db audits.db
+    """
+    from secureaudit.core.diff import diff_runs, resolve_run_id
+
+    if not Path(db).exists():
+        console.print(f"[red]Database not found: {db}[/red]")
+        sys.exit(1)
+
+    try:
+        id1 = resolve_run_id(db, run1)
+        id2 = resolve_run_id(db, run2)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
+
+    result = diff_runs(db, id1, id2, include_suppressed=include_suppressed)
+
+    if json_out:
+        import json as _json
+        console.print(_json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_diff(result)
+
+    if result.has_new_regression:
+        sys.exit(1)
+
+
 @cli.command(name="list-plugins")
 def list_plugins():
     """List all available plugins."""
@@ -296,6 +337,44 @@ def schedule(target, cron, config, plugins, db, alert_webhook, fail_below, outpu
         output_dir=output_dir,
         config_path=config,
     )
+
+
+def _print_diff(result) -> None:
+    console.print()
+    console.rule(f"[bold cyan]Diff: run #{result.run1_id} → run #{result.run2_id}[/bold cyan]")
+    console.print()
+
+    sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+
+    if result.new:
+        t = Table(title=f"🆕 New findings ({len(result.new)})", box=box.SIMPLE_HEAD, border_style="red")
+        t.add_column("Severity")
+        t.add_column("Plugin")
+        t.add_column("Title", overflow="fold")
+        t.add_column("File", overflow="fold")
+        for f in sorted(result.new, key=lambda x: sev_order.index(x["severity"])):
+            color = _SEV_COLOR.get(Severity(f["severity"]), "white")
+            t.add_row(f"[{color}]{f['severity']}[/]", f["plugin"], f["title"], f.get("file") or "")
+        console.print(t)
+    else:
+        console.print("[green]No new findings.[/green]")
+
+    if result.resolved:
+        t = Table(title=f"✅ Resolved findings ({len(result.resolved)})", box=box.SIMPLE_HEAD, border_style="green")
+        t.add_column("Severity")
+        t.add_column("Plugin")
+        t.add_column("Title", overflow="fold")
+        t.add_column("File", overflow="fold")
+        for f in sorted(result.resolved, key=lambda x: sev_order.index(x["severity"])):
+            t.add_row(f["severity"], f["plugin"], f["title"], f.get("file") or "")
+        console.print(t)
+
+    console.print(f"\n[dim]{result.unchanged_count} unchanged finding(s).[/dim]")
+
+    if result.has_new_regression:
+        console.print("\n[bold red]✘ Regression: new CRITICAL/HIGH findings introduced.[/bold red]\n")
+    else:
+        console.print("\n[green]✔ No regression.[/green]\n")
 
 
 def main():

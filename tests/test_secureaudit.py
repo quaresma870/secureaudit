@@ -692,3 +692,213 @@ class TestCLIIntegration:
         assert result.exit_code == 0
         for name in ("cors", "git_history", "sast", "malware", "trivy"):
             assert name in result.output
+
+
+# ── Diff ──────────────────────────────────────────────────────────────────────
+
+def _make_audit_result(target: str, findings: list[Finding]) -> AuditResult:
+    result = AuditResult(target=target)
+    pr = PluginResult(plugin="secrets")
+    pr.findings = findings
+    result.plugin_results = [pr]
+    return result
+
+
+class TestDiff:
+    def test_resolve_run_id_numeric(self):
+        from secureaudit.core.diff import resolve_run_id
+        assert resolve_run_id("unused.db", "42") == 42
+
+    def test_resolve_run_id_invalid_keyword(self):
+        from secureaudit.core.diff import resolve_run_id
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            with pytest.raises(ValueError):
+                resolve_run_id(db, "not-a-valid-ref")
+
+    def test_resolve_latest_and_previous(self):
+        from secureaudit.core.diff import resolve_run_id
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            r1 = save(_make_audit_result(d, []), db)
+            r2 = save(_make_audit_result(d, []), db)
+
+            assert resolve_run_id(db, "latest") == r2
+            assert resolve_run_id(db, "previous") == r1
+
+    def test_resolve_previous_fails_with_one_run(self):
+        from secureaudit.core.diff import resolve_run_id
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_audit_result(d, []), db)
+            with pytest.raises(ValueError):
+                resolve_run_id(db, "previous")
+
+    def test_diff_detects_new_and_resolved(self):
+        from secureaudit.core.diff import diff_runs
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+
+            r1 = save(_make_audit_result(d, [
+                Finding(plugin="secrets", title="Old Issue", severity=Severity.HIGH,
+                       description="", file="a.py"),
+            ]), db)
+
+            r2 = save(_make_audit_result(d, [
+                Finding(plugin="secrets", title="New Issue", severity=Severity.CRITICAL,
+                       description="", file="b.py"),
+            ]), db)
+
+            result = diff_runs(db, r1, r2)
+            assert len(result.new) == 1
+            assert result.new[0]["title"] == "New Issue"
+            assert len(result.resolved) == 1
+            assert result.resolved[0]["title"] == "Old Issue"
+            assert result.unchanged_count == 0
+
+    def test_diff_unchanged_findings_not_duplicated(self):
+        from secureaudit.core.diff import diff_runs
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            same_finding = Finding(plugin="secrets", title="Persistent Issue",
+                                   severity=Severity.MEDIUM, description="", file="a.py")
+
+            r1 = save(_make_audit_result(d, [same_finding]), db)
+            r2 = save(_make_audit_result(d, [same_finding]), db)
+
+            result = diff_runs(db, r1, r2)
+            assert result.new == []
+            assert result.resolved == []
+            assert result.unchanged_count == 1
+
+    def test_has_new_regression_true_for_critical(self):
+        from secureaudit.core.diff import diff_runs
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            r1 = save(_make_audit_result(d, []), db)
+            r2 = save(_make_audit_result(d, [
+                Finding(plugin="secrets", title="Critical Issue", severity=Severity.CRITICAL,
+                       description="", file="a.py"),
+            ]), db)
+            result = diff_runs(db, r1, r2)
+            assert result.has_new_regression
+
+    def test_has_new_regression_false_for_low_severity(self):
+        from secureaudit.core.diff import diff_runs
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            r1 = save(_make_audit_result(d, []), db)
+            r2 = save(_make_audit_result(d, [
+                Finding(plugin="secrets", title="Minor Issue", severity=Severity.LOW,
+                       description="", file="a.py"),
+            ]), db)
+            result = diff_runs(db, r1, r2)
+            assert not result.has_new_regression
+
+    def test_diff_excludes_suppressed_by_default(self):
+        from secureaudit.core.diff import diff_runs
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            target = str(d)
+            db = str(Path(d) / "audits.db")
+
+            result1 = AuditResult(target=target)
+            result1.suppressed_findings = [
+                Finding(plugin="secrets", title="Suppressed Issue", severity=Severity.HIGH,
+                       description="", file="a.py"),
+            ]
+            r1 = save(result1, db)
+            r2 = save(_make_audit_result(target, []), db)
+
+            diff_result = diff_runs(db, r1, r2)
+            assert diff_result.resolved == []  # suppressed findings excluded by default
+
+    def test_diff_includes_suppressed_when_requested(self):
+        from secureaudit.core.diff import diff_runs
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            target = str(d)
+            db = str(Path(d) / "audits.db")
+
+            result1 = AuditResult(target=target)
+            result1.suppressed_findings = [
+                Finding(plugin="secrets", title="Suppressed Issue", severity=Severity.HIGH,
+                       description="", file="a.py"),
+            ]
+            r1 = save(result1, db)
+            r2 = save(_make_audit_result(target, []), db)
+
+            diff_result = diff_runs(db, r1, r2, include_suppressed=True)
+            assert len(diff_result.resolved) == 1
+
+
+class TestDiffCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_diff_command_no_regression_exits_zero(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_audit_result(d, []), db)
+            save(_make_audit_result(d, []), db)
+
+            result = runner.invoke(cli, ["diff", "1", "2", "--db", db])
+            assert result.exit_code == 0, result.output
+
+    def test_diff_command_regression_exits_nonzero(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_audit_result(d, []), db)
+            save(_make_audit_result(d, [
+                Finding(plugin="secrets", title="New Critical", severity=Severity.CRITICAL,
+                       description="", file="a.py"),
+            ]), db)
+
+            result = runner.invoke(cli, ["diff", "1", "2", "--db", db])
+            assert result.exit_code == 1
+
+    def test_diff_command_missing_db(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["diff", "1", "2", "--db", "/nonexistent/audits.db"])
+        assert result.exit_code != 0
+
+    def test_diff_command_json_output(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_audit_result(d, []), db)
+            save(_make_audit_result(d, []), db)
+
+            result = runner.invoke(cli, ["diff", "latest", "previous", "--db", db, "--json"])
+            assert result.exit_code == 0
+            import json as _json
+            data = _json.loads(result.output)
+            assert "new" in data
+            assert "resolved" in data
