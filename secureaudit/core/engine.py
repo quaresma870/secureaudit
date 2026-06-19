@@ -41,9 +41,13 @@ _load_plugins()
 
 
 class AuditEngine:
-    def __init__(self, config: Config, workers: int = 6):
+    def __init__(self, config: Config, workers: int = 6, cache=None):
         self.config = config
         self.workers = workers
+        # FileCache | None — shared across plugin instances. Plain dict writes
+        # are atomic under CPython's GIL, so concurrent .set() calls from the
+        # parallel plugin threads below are safe without an explicit lock.
+        self.cache = cache
 
     def run(self, target: str | Path, plugins: list[str] | None = None) -> AuditResult:
         from secureaudit.plugins import get_plugin
@@ -57,7 +61,9 @@ class AuditEngine:
         plugin_instances = []
         for name in plugin_names:
             try:
-                plugin_instances.append((name, get_plugin(name, self.config)))
+                plugin = get_plugin(name, self.config)
+                plugin.cache = self.cache
+                plugin_instances.append((name, plugin))
             except Exception as exc:
                 result.plugin_results.append(PluginResult(plugin=name, error=str(exc)))
 

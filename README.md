@@ -112,6 +112,13 @@ secureaudit scan . --alert-slack https://hooks.slack.com/services/...
 # Weekly digest to Slack (run via your own cron, separate from `schedule`)
 secureaudit digest . --db audits.db --slack-webhook https://hooks.slack.com/services/...
 
+# Check/clear the incremental scan cache
+secureaudit cache status .
+secureaudit cache clear .
+
+# Force a full rescan, bypassing the cache
+secureaudit scan . --no-cache
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -221,6 +228,16 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.2.0
+- feat: incremental scan caching for `secrets`, `sast`, and `policy` (Dockerfile/CI checks) — closes #23
+  - `.secureaudit-cache/` keyed by file content hash + plugin identity + plugin config hash
+  - Unchanged files reuse cached results; a fully cache-hit SAST run never invokes `semgrep` at all
+  - Changing a plugin's config in `secureaudit.yml` automatically invalidates affected entries
+  - `--no-cache` forces a full rescan; `secureaudit cache status .` / `secureaudit cache clear .`
+- fix: hard-excluded `.secureaudit-cache/` from all file-collecting plugins, independent of any
+  user-configured `exclude_paths` — without this, the cache file (which stores matched secret
+  evidence text) would be re-scanned as a *new* secret on every subsequent run, growing forever
 
 ### v1.1.0
 - feat: native Slack notifications (`--alert-slack <webhook>`) — closes #21

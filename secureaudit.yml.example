@@ -118,3 +118,15 @@ trivy:
 #   secureaudit scan . --alert-teams https://outlook.office.com/webhook/...
 #   secureaudit schedule . --cron "0 6 * * 1" --alert-slack URL --dashboard-url https://...
 #   secureaudit digest . --db audits.db --slack-webhook URL --days 7
+
+# ── Incremental scanning ──────────────────────────────────────────────────────
+#
+# Enabled by default for secrets, sast and policy (Dockerfile/CI checks).
+# Cache lives in .secureaudit-cache/ next to the scanned target — add it to
+# .gitignore (already handled if you cloned secureaudit's own .gitignore as
+# a starting point).
+#
+#   secureaudit scan .              # cache used automatically
+#   secureaudit scan . --no-cache   # force a full rescan
+#   secureaudit cache status .
+#   secureaudit cache clear .

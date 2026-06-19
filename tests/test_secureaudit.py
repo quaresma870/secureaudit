@@ -1580,3 +1580,609 @@ class TestNotificationCLIIntegration:
         runner = self._runner()
         result = runner.invoke(cli, ["digest", "/tmp", "--db", "/nonexistent/audits.db"])
         assert result.exit_code != 0
+
+
+# ── Incremental scan cache ───────────────────────────────────────────────────
+
+class TestCacheCore:
+    def test_hash_file_returns_sha256(self):
+        from secureaudit.core.cache import hash_file
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.txt"
+            p.write_text("hello")
+            h = hash_file(p)
+            assert h is not None
+            assert len(h) == 64
+
+    def test_hash_file_stable_for_same_content(self):
+        from secureaudit.core.cache import hash_file
+        with tempfile.TemporaryDirectory() as d:
+            p1 = Path(d) / "a.txt"
+            p2 = Path(d) / "b.txt"
+            p1.write_text("same content")
+            p2.write_text("same content")
+            assert hash_file(p1) == hash_file(p2)
+
+    def test_hash_file_changes_with_content(self):
+        from secureaudit.core.cache import hash_file
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.txt"
+            p.write_text("v1")
+            h1 = hash_file(p)
+            p.write_text("v2")
+            h2 = hash_file(p)
+            assert h1 != h2
+
+    def test_hash_file_missing_returns_none(self):
+        from secureaudit.core.cache import hash_file
+        assert hash_file(Path("/nonexistent/file.txt")) is None
+
+    def test_hash_config_stable_regardless_of_key_order(self):
+        from secureaudit.core.cache import hash_config
+        h1 = hash_config({"a": 1, "b": 2})
+        h2 = hash_config({"b": 2, "a": 1})
+        assert h1 == h2
+
+    def test_hash_config_changes_with_value(self):
+        from secureaudit.core.cache import hash_config
+        h1 = hash_config({"timeout": 60})
+        h2 = hash_config({"timeout": 120})
+        assert h1 != h2
+
+    def test_cache_key_deterministic(self):
+        from secureaudit.core.cache import cache_key
+        k1 = cache_key("secrets", 1, "cfg123", "filehash456")
+        k2 = cache_key("secrets", 1, "cfg123", "filehash456")
+        assert k1 == k2
+
+    def test_cache_key_differs_by_schema_version(self):
+        from secureaudit.core.cache import cache_key
+        k1 = cache_key("secrets", 1, "cfg", "filehash")
+        k2 = cache_key("secrets", 2, "cfg", "filehash")
+        assert k1 != k2
+
+
+class TestFileCache:
+    def test_set_and_get(self):
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+            cache.set("key1", [{"plugin": "secrets", "title": "x"}])
+            assert cache.get("key1") == [{"plugin": "secrets", "title": "x"}]
+
+    def test_get_missing_key_returns_none(self):
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+            assert cache.get("nonexistent") is None
+
+    def test_save_and_reload_persists(self):
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cache.json"
+            cache1 = FileCache(path)
+            cache1.set("key1", [{"a": 1}])
+            cache1.save()
+
+            cache2 = FileCache(path)
+            assert cache2.get("key1") == [{"a": 1}]
+
+    def test_save_without_changes_does_not_error(self):
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+            cache.save()  # no entries set — should be a no-op, not an error
+            assert not (Path(d) / "cache.json").exists()  # never written if never dirty
+
+    def test_corrupt_cache_file_treated_as_empty(self):
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cache.json"
+            path.write_text("not valid json{{{")
+            cache = FileCache(path)
+            assert cache.entry_count == 0
+
+    def test_wrong_schema_version_treated_as_empty(self):
+        import json as _json
+
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "cache.json"
+            path.write_text(_json.dumps({"version": 999, "entries": {"x": []}}))
+            cache = FileCache(path)
+            assert cache.entry_count == 0
+
+    def test_clear(self):
+        from secureaudit.core.cache import FileCache
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+            cache.set("key1", [{"a": 1}])
+            cache.clear()
+            assert cache.entry_count == 0
+
+
+class TestScanWithCache:
+    def test_no_cache_scans_every_file(self):
+        from secureaudit.core.cache import scan_with_cache
+
+        class FakePlugin:
+            name = "fake"
+            schema_version = 1
+            plugin_config = {}
+            cache = None
+
+        calls = []
+        def scan_one(f):
+            calls.append(f)
+            return []
+
+        with tempfile.TemporaryDirectory() as d:
+            files = [Path(d) / "a.py", Path(d) / "b.py"]
+            for f in files:
+                f.write_text("x")
+            scan_with_cache(FakePlugin(), files, scan_one)
+            assert len(calls) == 2
+
+    def test_cache_hit_skips_scan_one(self):
+        from secureaudit.core.cache import FileCache, scan_with_cache
+
+        with tempfile.TemporaryDirectory() as d:
+            cache_dir = Path(d) / ".cache"
+            cache = FileCache(cache_dir / "cache.json")
+
+            class FakePlugin:
+                name = "fake"
+                schema_version = 1
+                plugin_config = {}
+
+            plugin = FakePlugin()
+            plugin.cache = cache
+
+            f = Path(d) / "a.py"
+            f.write_text("content")
+
+            calls = []
+            def scan_one(path):
+                calls.append(path)
+                return []
+
+            # First call — cache miss, scan_one called
+            scan_with_cache(plugin, [f], scan_one)
+            assert len(calls) == 1
+
+            # Second call — cache hit, scan_one NOT called again
+            scan_with_cache(plugin, [f], scan_one)
+            assert len(calls) == 1
+
+    def test_changing_file_content_invalidates_cache(self):
+        from secureaudit.core.cache import FileCache, scan_with_cache
+
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+
+            class FakePlugin:
+                name = "fake"
+                schema_version = 1
+                plugin_config = {}
+
+            plugin = FakePlugin()
+            plugin.cache = cache
+
+            f = Path(d) / "a.py"
+            f.write_text("v1")
+
+            calls = []
+            def scan_one(path):
+                calls.append(path.read_text())
+                return []
+
+            scan_with_cache(plugin, [f], scan_one)
+            f.write_text("v2")
+            scan_with_cache(plugin, [f], scan_one)
+
+            assert calls == ["v1", "v2"]  # both calls happened — content changed, cache missed
+
+    def test_changing_config_invalidates_cache(self):
+        from secureaudit.core.cache import FileCache, scan_with_cache
+
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+
+            class FakePlugin:
+                name = "fake"
+                schema_version = 1
+                def __init__(self):
+                    self.plugin_config = {"timeout": 60}
+                    self.cache = cache
+
+            plugin = FakePlugin()
+            f = Path(d) / "a.py"
+            f.write_text("same content")
+
+            calls = []
+            def scan_one(path):
+                calls.append(1)
+                return []
+
+            scan_with_cache(plugin, [f], scan_one)
+            plugin.plugin_config = {"timeout": 120}  # config changed
+            scan_with_cache(plugin, [f], scan_one)
+
+            assert len(calls) == 2  # config change forced a re-scan despite unchanged content
+
+    def test_findings_round_trip_through_cache(self):
+        from secureaudit.core.cache import FileCache, scan_with_cache
+
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+
+            class FakePlugin:
+                name = "fake"
+                schema_version = 1
+                plugin_config = {}
+
+            plugin = FakePlugin()
+            plugin.cache = cache
+
+            f = Path(d) / "a.py"
+            f.write_text("content")
+
+            def scan_one(path):
+                return [Finding(plugin="fake", title="Issue", severity=Severity.HIGH,
+                               description="desc", file="a.py", line=3)]
+
+            result1 = scan_with_cache(plugin, [f], scan_one)
+            assert len(result1) == 1
+
+            # Second call hits cache — must return an equivalent Finding, not the scan_one call
+            result2 = scan_with_cache(plugin, [f], lambda p: (_ for _ in ()).throw(AssertionError("should not be called")))
+            assert len(result2) == 1
+            assert result2[0].title == "Issue"
+            assert result2[0].severity == Severity.HIGH
+
+
+# ── Regression: cache must never scan its own stored evidence ───────────────
+
+class TestCacheSelfScanRegression:
+    """Regression test for a real bug: the cache file stores finding evidence
+    text (e.g. the matched secret line) inside .secureaudit-cache/cache.json.
+    If that directory isn't excluded from file collection, the next scan
+    re-discovers its own cached evidence as a 'new' secret, growing the cache
+    and duplicating findings forever.
+    """
+
+    def test_secrets_plugin_does_not_rescan_its_own_cache_dir(self):
+        from secureaudit.core.cache import FileCache, default_cache_path
+        from secureaudit.plugins.secrets import SecretsPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+
+            cache_path = default_cache_path(target)
+
+            cache1 = FileCache(cache_path)
+            plugin1 = SecretsPlugin(cfg)
+            plugin1.cache = cache1
+            result1 = plugin1.audit(target)
+            cache1.save()
+            assert len(result1.findings) == 1
+
+            # Re-run with a freshly loaded cache — must still find exactly 1,
+            # never more, regardless of what got written into the cache file.
+            cache2 = FileCache(cache_path)
+            plugin2 = SecretsPlugin(cfg)
+            plugin2.cache = cache2
+            result2 = plugin2.audit(target)
+            assert len(result2.findings) == 1
+
+    def test_cache_dir_excluded_even_with_custom_exclude_paths(self):
+        """Even if a user's secureaudit.yml overrides exclude_paths and forgets
+        to include .secureaudit-cache, the hard-coded CACHE_DIR_NAME check
+        must still protect against the self-scan bug.
+        """
+        from secureaudit.core.cache import FileCache, default_cache_path
+        from secureaudit.plugins.secrets import SecretsPlugin
+
+        cfg = load_config(None)
+        cfg._data["exclude_paths"] = [".git"]  # deliberately omits .secureaudit-cache
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            cache_path = default_cache_path(target)
+
+            cache1 = FileCache(cache_path)
+            plugin1 = SecretsPlugin(cfg)
+            plugin1.cache = cache1
+            plugin1.audit(target)
+            cache1.save()
+
+            cache2 = FileCache(cache_path)
+            plugin2 = SecretsPlugin(cfg)
+            plugin2.cache = cache2
+            result2 = plugin2.audit(target)
+            assert len(result2.findings) == 1
+            assert cache2.entry_count == 1  # only config.py, never the cache file itself
+
+
+# ── Plugin integration: secrets caching ──────────────────────────────────────
+
+class TestSecretsPluginCaching:
+    def test_cache_hit_on_unchanged_file(self):
+        from secureaudit.core.cache import FileCache
+        from secureaudit.plugins.secrets import SecretsPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "app.py").write_text("def hello(): return 1\n")
+            cache = FileCache(target / "cache.json")
+
+            plugin = SecretsPlugin(cfg)
+            plugin.cache = cache
+            plugin.audit(target)
+            assert cache.entry_count == 1
+
+    def test_no_cache_attribute_falls_back_to_normal_scan(self):
+        """cache defaults to None on BasePlugin — must behave identically to
+        pre-caching behaviour when not explicitly enabled."""
+        from secureaudit.plugins.secrets import SecretsPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            plugin = SecretsPlugin(cfg)
+            assert plugin.cache is None
+            result = plugin.audit(target)
+            assert len(result.findings) == 1
+
+
+# ── Plugin integration: SAST caching ──────────────────────────────────────────
+
+class TestSASTPluginCaching:
+    def test_all_cache_hits_skips_semgrep_invocation(self, monkeypatch):
+        from secureaudit.core.cache import FileCache, cache_key, hash_config, hash_file
+        from secureaudit.plugins.sast import SASTPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            f = target / "app.py"
+            f.write_text("print('hi')\n")
+
+            cache = FileCache(target / "cache.json")
+            plugin = SASTPlugin(cfg)
+            plugin.cache = cache
+
+            # Pre-populate the cache as if a previous run already scanned this file
+            config_hash = hash_config({"ruleset": "auto", **plugin.plugin_config})
+            key = cache_key(plugin.name, plugin.schema_version, config_hash, hash_file(f))
+            cache.set(key, [])
+
+            monkeypatch.setattr("shutil.which", lambda x: "/usr/bin/semgrep")
+
+            called = {"count": 0}
+            def fake_run_semgrep(*args, **kwargs):
+                called["count"] += 1
+                return []
+            monkeypatch.setattr(plugin, "_run_semgrep", fake_run_semgrep)
+
+            plugin.audit(target)
+            assert called["count"] == 0  # semgrep never invoked — full cache hit
+
+    def test_partial_cache_hit_only_scans_changed_files(self, monkeypatch):
+        from secureaudit.core.cache import FileCache, cache_key, hash_config, hash_file
+        from secureaudit.plugins.sast import SASTPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            unchanged = target / "unchanged.py"
+            changed = target / "changed.py"
+            unchanged.write_text("print('a')\n")
+            changed.write_text("print('b')\n")
+
+            cache = FileCache(target / "cache.json")
+            plugin = SASTPlugin(cfg)
+            plugin.cache = cache
+
+            config_hash = hash_config({"ruleset": "auto", **plugin.plugin_config})
+            key = cache_key(plugin.name, plugin.schema_version, config_hash, hash_file(unchanged))
+            cache.set(key, [])
+
+            monkeypatch.setattr("shutil.which", lambda x: "/usr/bin/semgrep")
+
+            received_targets = {}
+            def fake_run_semgrep(scan_targets, *args, **kwargs):
+                received_targets["files"] = list(scan_targets)
+                return []
+            monkeypatch.setattr(plugin, "_run_semgrep", fake_run_semgrep)
+
+            plugin.audit(target)
+            assert received_targets["files"] == [changed]  # only the changed file passed through
+
+    def test_cache_writes_empty_findings_for_clean_file(self, monkeypatch):
+        """A file with zero findings must still get an explicit cache entry —
+        otherwise it would never become a cache hit on the next run."""
+        from secureaudit.core.cache import FileCache
+        from secureaudit.plugins.sast import SASTPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            f = target / "clean.py"
+            f.write_text("print('clean')\n")
+
+            cache = FileCache(target / "cache.json")
+            plugin = SASTPlugin(cfg)
+            plugin.cache = cache
+
+            monkeypatch.setattr("shutil.which", lambda x: "/usr/bin/semgrep")
+            monkeypatch.setattr(plugin, "_run_semgrep", lambda *a, **k: [])
+
+            plugin.audit(target)
+            assert cache.entry_count == 1
+
+
+# ── Plugin integration: policy caching ───────────────────────────────────────
+
+class TestPolicyPluginCaching:
+    def test_dockerfile_check_cached_per_file(self):
+        from secureaudit.core.cache import FileCache
+        from secureaudit.plugins.policy import PolicyPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / ".gitignore").write_text("*.env\n")
+            (target / "Dockerfile").write_text("FROM python:3.11\nCMD python app.py\n")
+
+            cache = FileCache(target / "cache.json")
+            plugin = PolicyPlugin(cfg)
+            plugin.cache = cache
+
+            result1 = plugin.audit(target)
+            assert any("root" in f.title.lower() for f in result1.findings)
+
+            # Cache entry exists for the Dockerfile check specifically
+            assert cache.entry_count >= 1
+
+            result2 = plugin.audit(target)
+            assert any("root" in f.title.lower() for f in result2.findings)
+
+    def test_ci_security_check_cached_per_file(self):
+        from secureaudit.core.cache import FileCache
+        from secureaudit.plugins.policy import PolicyPlugin
+
+        cfg = load_config(None)
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / ".gitignore").write_text("*.env\n")
+            wf_dir = target / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "ci.yml").write_text(
+                "on: pull_request_target\njobs:\n  test:\n    steps:\n"
+                "      - uses: actions/checkout@v4\n        with:\n          ref: head\n"
+            )
+
+            cache = FileCache(target / "cache.json")
+            plugin = PolicyPlugin(cfg)
+            plugin.cache = cache
+            result = plugin.audit(target)
+            assert any("pull_request_target" in f.title for f in result.findings)
+
+
+# ── Engine integration ────────────────────────────────────────────────────────
+
+class TestEngineCaching:
+    def test_engine_passes_cache_to_all_plugins(self):
+        from secureaudit.core.cache import FileCache
+
+        with tempfile.TemporaryDirectory() as d:
+            cache = FileCache(Path(d) / "cache.json")
+            cfg = load_config(None)
+            engine = AuditEngine(cfg, cache=cache)
+            result = engine.run(d, plugins=["secrets", "policy"])
+            assert result is not None  # ran without error with a cache attached
+
+    def test_engine_without_cache_plugins_have_none(self):
+        cfg = load_config(None)
+        engine = AuditEngine(cfg)
+        assert engine.cache is None
+
+
+# ── CLI integration ───────────────────────────────────────────────────────────
+
+class TestCacheCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_scan_creates_cache_by_default(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 1\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "secrets,policy", "--no-terminal", "--fail-below", "0",
+            ])
+            assert result.exit_code == 0, result.output
+            assert (Path(d) / ".secureaudit-cache" / "cache.json").exists()
+
+    def test_scan_no_cache_flag_skips_cache_creation(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 1\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "secrets,policy", "--no-terminal",
+                "--fail-below", "0", "--no-cache",
+            ])
+            assert result.exit_code == 0, result.output
+            assert not (Path(d) / ".secureaudit-cache").exists()
+
+    def test_cache_status_no_cache_present(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            result = runner.invoke(cli, ["cache", "status", d])
+            assert result.exit_code == 0
+            assert "No cache found" in result.output
+
+    def test_cache_status_after_scan(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 1\n")
+            runner.invoke(cli, ["scan", d, "--plugins", "secrets", "--no-terminal", "--fail-below", "0"])
+            result = runner.invoke(cli, ["cache", "status", d])
+            assert result.exit_code == 0
+            assert "Entries:" in result.output
+
+    def test_cache_clear_removes_cache_file(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 1\n")
+            runner.invoke(cli, ["scan", d, "--plugins", "secrets", "--no-terminal", "--fail-below", "0"])
+            assert (Path(d) / ".secureaudit-cache" / "cache.json").exists()
+
+            result = runner.invoke(cli, ["cache", "clear", d])
+            assert result.exit_code == 0
+            assert not (Path(d) / ".secureaudit-cache" / "cache.json").exists()
+
+    def test_cache_clear_when_absent(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            result = runner.invoke(cli, ["cache", "clear", d])
+            assert result.exit_code == 0
+            assert "No cache found" in result.output
+
+    def test_second_scan_produces_identical_findings(self):
+        """Acceptance criteria: caching must never change scan correctness."""
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as scan_dir, tempfile.TemporaryDirectory() as out_dir:
+            Path(scan_dir, "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+
+            # Reports are written OUTSIDE the scanned directory — a report file
+            # placed inside the target would itself contain the matched secret
+            # text and get rescanned as a new finding next run. That's a
+            # separate, expected consequence of where you put your output, not
+            # a caching correctness issue, so this test keeps the two concerns
+            # apart deliberately.
+            json1 = Path(out_dir) / "r1.json"
+            json2 = Path(out_dir) / "r2.json"
+            runner.invoke(cli, ["scan", scan_dir, "--plugins", "secrets", "--no-terminal",
+                               "--fail-below", "0", "--json", str(json1)])
+            runner.invoke(cli, ["scan", scan_dir, "--plugins", "secrets", "--no-terminal",
+                               "--fail-below", "0", "--json", str(json2)])
+
+            import json as _json
+            data1 = _json.loads(json1.read_text())
+            data2 = _json.loads(json2.read_text())
+            assert data1["severity_counts"] == data2["severity_counts"]

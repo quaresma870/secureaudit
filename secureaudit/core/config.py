@@ -12,7 +12,8 @@ import yaml
 _DEFAULTS: dict[str, Any] = {
     "plugins": ["secrets", "cve", "filesystem", "http", "network", "policy", "cors", "git_history"],
     "fail_below": 70,
-    "exclude_paths": [".git", "node_modules", ".venv", "__pycache__", "dist", "build"],
+    "exclude_paths": [".git", "node_modules", ".venv", "__pycache__", "dist", "build",
+                      ".secureaudit-cache"],
     "secrets": {
         "exclude_extensions": [".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
                                ".pdf", ".zip", ".tar", ".gz", ".woff", ".woff2"],

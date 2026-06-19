@@ -136,10 +136,12 @@ def init(target, yes, force, baseline):
 @click.option("--alert-slack", default=None, help="Slack incoming webhook URL — sends a Block Kit summary")
 @click.option("--alert-teams", default=None, help="Teams incoming webhook URL — sends an Adaptive Card summary")
 @click.option("--dashboard-url", default=None, help="Link included in Slack/Teams messages (e.g. dashboard run URL)")
+@click.option("--no-cache", is_flag=True,
+              help="Disable incremental file-result caching — forces a full rescan of every file.")
 def scan(
     target, config, plugins, output, json_out, sarif_out, db, fail_below,
     no_terminal, baseline_file, no_baseline, no_inline_suppress,
-    alert_slack, alert_teams, dashboard_url,
+    alert_slack, alert_teams, dashboard_url, no_cache,
 ):
     """Run a security audit on TARGET (default: current directory)."""
 
@@ -154,8 +156,16 @@ def scan(
         plugin_names = plugin_list or cfg.plugins
         console.print(f"  [dim]Plugins:[/dim] {', '.join(plugin_names)}\n")
 
-    engine = AuditEngine(cfg)
+    cache = None
+    if not no_cache:
+        from secureaudit.core.cache import FileCache, default_cache_path
+        cache = FileCache(default_cache_path(target))
+
+    engine = AuditEngine(cfg, cache=cache)
     result = engine.run(target, plugin_list)
+
+    if cache is not None:
+        cache.save()
 
     # ── Baseline + inline suppression ───────────────────────────────────────
     from secureaudit.core.baseline import apply_suppressions, default_baseline_path
@@ -541,6 +551,48 @@ def pre_commit_run():
     if root is None:
         sys.exit(0)  # not a git repo somehow — never block on our own confusion
     sys.exit(run_staged_scan(root))
+
+
+@cli.group()
+def cache():
+    """Manage the incremental scan cache (.secureaudit-cache/)."""
+
+
+@cache.command(name="clear")
+@click.argument("target", default=".", type=click.Path(exists=True))
+def cache_clear(target):
+    """Delete the incremental scan cache for TARGET, forcing a full rescan next time."""
+    from secureaudit.core.cache import default_cache_path
+
+    path = default_cache_path(target)
+    if path.exists():
+        path.unlink()
+        # Remove the directory too if now empty
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        console.print(f"[green]✔[/green] Cache cleared: [bold]{path}[/bold]")
+    else:
+        console.print(f"[yellow]No cache found at {path}[/yellow]")
+
+
+@cache.command(name="status")
+@click.argument("target", default=".", type=click.Path(exists=True))
+def cache_status(target):
+    """Show cache entry count and file size for TARGET."""
+    from secureaudit.core.cache import FileCache, default_cache_path
+
+    path = default_cache_path(target)
+    if not path.exists():
+        console.print(f"[yellow]No cache found at {path}[/yellow]")
+        return
+
+    c = FileCache(path)
+    size_kb = path.stat().st_size / 1024
+    console.print(f"[bold]Cache:[/bold] {path}")
+    console.print(f"  Entries: {c.entry_count}")
+    console.print(f"  Size: {size_kb:.1f} KB")
 
 
 def _print_diff(result) -> None:

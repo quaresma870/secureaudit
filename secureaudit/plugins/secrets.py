@@ -108,7 +108,15 @@ class SecretsPlugin(BasePlugin):
         exclude_paths = set(self.config.exclude_paths)
 
         files = self._collect_files(target, exclude_paths, exclude_exts, max_size)
-        result.findings = self.scan_files(files, target)
+
+        if self.cache is not None:
+            from secureaudit.core.cache import scan_with_cache
+            result.findings = scan_with_cache(
+                self, files, lambda f: self._scan_one_file(f, target),
+            )
+        else:
+            result.findings = self.scan_files(files, target)
+
         return result
 
     def scan_files(self, files: list[Path], base: Path) -> list[Finding]:
@@ -118,50 +126,60 @@ class SecretsPlugin(BasePlugin):
         files without paying the cost of a full repository walk.
         """
         findings: list[Finding] = []
-
         for file_path in files:
-            try:
-                content = file_path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+            findings.extend(self._scan_one_file(file_path, base))
+        return findings
+
+    def _scan_one_file(self, file_path: Path, base: Path) -> list[Finding]:
+        """Scan a single file. Split out from scan_files() so the incremental
+        cache can key results per file rather than per batch."""
+        findings: list[Finding] = []
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return findings
+
+        try:
+            rel_path = str(file_path.relative_to(base))
+        except ValueError:
+            rel_path = str(file_path)
+
+        for line_num, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith(("#", "//", "*", "<!--")):
                 continue
 
-            try:
-                rel_path = str(file_path.relative_to(base))
-            except ValueError:
-                rel_path = str(file_path)
-
-            for line_num, line in enumerate(content.splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith(("#", "//", "*", "<!--")):
-                    continue
-
-                for name, pattern, severity, remediation, check_entropy in _PATTERNS:
-                    for match in pattern.finditer(line):
-                        secret_val = match.group(1) if match.lastindex else match.group(0)
-                        # Apply entropy filter only for generic patterns
-                        if check_entropy and _shannon_entropy(secret_val) < _ENTROPY_THRESHOLD and len(secret_val) < 32:
-                            continue
-                        findings.append(Finding(
-                            plugin=self.name,
-                            title=f"{name} detected",
-                            severity=severity,
-                            description=f"Possible {name} found in {rel_path}",
-                            file=rel_path,
-                            line=line_num,
-                            evidence=line.strip()[:120],
-                            remediation=remediation,
-                            reference="https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_credentials",
-                        ))
+            for name, pattern, severity, remediation, check_entropy in _PATTERNS:
+                for match in pattern.finditer(line):
+                    secret_val = match.group(1) if match.lastindex else match.group(0)
+                    # Apply entropy filter only for generic patterns
+                    if check_entropy and _shannon_entropy(secret_val) < _ENTROPY_THRESHOLD and len(secret_val) < 32:
+                        continue
+                    findings.append(Finding(
+                        plugin=self.name,
+                        title=f"{name} detected",
+                        severity=severity,
+                        description=f"Possible {name} found in {rel_path}",
+                        file=rel_path,
+                        line=line_num,
+                        evidence=line.strip()[:120],
+                        remediation=remediation,
+                        reference="https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_credentials",
+                    ))
 
         return findings
 
     def _collect_files(
         self, target: Path, exclude_paths: set, exclude_exts: set, max_size: int
     ) -> list[Path]:
+        from secureaudit.core.cache import CACHE_DIR_NAME
+
         files = []
         for f in target.rglob("*"):
             if not f.is_file():
                 continue
+            if CACHE_DIR_NAME in f.parts:
+                continue  # never scan our own cache, regardless of user exclude_paths config
             if any(part in exclude_paths for part in f.parts):
                 continue
             if f.suffix.lower() in exclude_exts:
