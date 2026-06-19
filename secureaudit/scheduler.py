@@ -65,6 +65,9 @@ def run_schedule(
     fail_below: int,
     output_dir: str | None,
     config_path: str | None,
+    alert_slack: str | None = None,
+    alert_teams: str | None = None,
+    dashboard_url: str | None = None,
 ) -> None:
     """Run security audits on a cron schedule."""
     try:
@@ -134,8 +137,19 @@ def run_schedule(
                 "high": counts.get("HIGH", 0),
                 "run_url": f"run #{run_id}" if run_id else "N/A",
             })
-            console.print(f"[yellow]⚠  Alert sent:[/yellow] {reason}")
-        elif should_alert:
+            console.print(f"[yellow]⚠  Webhook alert sent:[/yellow] {reason}")
+
+        if should_alert and alert_slack:
+            from secureaudit.notifications import send_slack
+            send_slack(alert_slack, result, dashboard_url)
+            console.print(f"[yellow]⚠  Slack alert sent:[/yellow] {reason}")
+
+        if should_alert and alert_teams:
+            from secureaudit.notifications import send_teams
+            send_teams(alert_teams, result, dashboard_url)
+            console.print(f"[yellow]⚠  Teams alert sent:[/yellow] {reason}")
+
+        if should_alert and not (alert_webhook or alert_slack or alert_teams):
             console.print(f"[yellow]⚠  {reason}[/yellow]")
 
     _parse_cron(cron_expr, job)
