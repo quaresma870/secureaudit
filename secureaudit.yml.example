@@ -134,3 +134,12 @@ trivy:
 #   secureaudit scan . --no-cache   # force a full rescan
 #   secureaudit cache status .
 #   secureaudit cache clear .
+
+# ── Compliance reporting ───────────────────────────────────────────────────────
+#
+#   secureaudit scan . --compliance-report owasp-asvs
+#   secureaudit scan . --compliance-report owasp-asvs --compliance-output compliance.json
+#
+# Best-effort mapping to OWASP ASVS v4.0.3 — not a substitute for a full
+# assessment. See secureaudit/compliance/owasp_asvs.py for the exact mapping
+# and its documented caveats.

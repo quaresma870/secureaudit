@@ -128,6 +128,10 @@ secureaudit serve --db audits.db
 # Bound to a real network interface — requires a token for writes:
 secureaudit serve --db audits.db --host 0.0.0.0 --token your-secret
 
+# Control-by-control OWASP ASVS compliance breakdown
+secureaudit scan . --compliance-report owasp-asvs
+secureaudit scan . --compliance-report owasp-asvs --compliance-output compliance.json
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -237,6 +241,20 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.5.0
+- feat: OWASP ASVS v4.0.3 compliance mapping — `--compliance-report owasp-asvs` — closes #22
+  - 15 ASVS controls mapped across 9 plugins (secrets, cve, trivy, http, cors, sast, policy,
+    malware, git_history) — control-by-control PASS / FAIL / NOT_APPLICABLE breakdown
+  - `--compliance-output path.json` for a machine-readable export
+  - **Best-effort mapping, not a certification tool** — requirement descriptions are paraphrased
+    summaries; verify against the official standard before relying on this for a real audit:
+    https://github.com/OWASP/ASVS/tree/master/4.0
+  - A control is `NOT_APPLICABLE` when none of the plugins that could provide evidence for it
+    were run in this scan; `PASS` means the relevant plugin(s) ran clean, not that every aspect
+    of the requirement was independently verified
+  - Suppressed/baselined findings never count as compliance failures, consistent with how they're
+    excluded from the security score
 
 ### v1.4.0
 - feat: REST API for the dashboard — closes #25
