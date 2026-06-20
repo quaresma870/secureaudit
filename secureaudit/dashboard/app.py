@@ -1,12 +1,19 @@
 """
 SecureAudit web dashboard — FastAPI + Jinja2.
 Start with: secureaudit serve --db audits.db
+
+REST API for write operations (POST /api/scan, POST /api/projects/{name}/webhooks)
+is token-gated when the dashboard is bound to anything other than localhost —
+see `secureaudit serve --token` / the SECUREAUDIT_API_TOKEN env var.
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+import uuid
+
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from secureaudit.reports.history import (
     get_project_run_count,
@@ -45,8 +52,33 @@ footer{color:var(--muted);font-size:.75rem;margin-top:2rem;text-align:center}
 """
 
 
-def create_app(db_path: str) -> FastAPI:
-    app = FastAPI(title="SecureAudit Dashboard", docs_url=None, redoc_url=None)
+class ScanRequest(BaseModel):
+    target: str
+    plugins: list[str] | None = None
+    config: str | None = None
+    project: str | None = None
+
+
+class WebhookRequest(BaseModel):
+    url: str
+
+
+def create_app(db_path: str, api_token: str | None = None, require_token: bool = False) -> FastAPI:
+    app = FastAPI(title="SecureAudit Dashboard")
+    app.state.pending_scans = {}
+
+    async def verify_token(authorization: str | None = Header(default=None)) -> None:
+        """Dependency for write endpoints. No-op when the dashboard has no
+        token configured and isn't required to have one (localhost default)."""
+        if not require_token and not api_token:
+            return
+        if not api_token:
+            raise HTTPException(status_code=503, detail="Server misconfigured: no API token set.")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
+        provided = authorization[len("Bearer "):]
+        if provided != api_token:
+            raise HTTPException(status_code=401, detail="Invalid API token.")
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -228,7 +260,76 @@ new Chart(document.getElementById('trendChart'), {{
         return JSONResponse(get_projects(db_path))
 
     @app.get("/api/runs/{run_id}/findings")
-    async def api_findings(run_id: int):
-        return JSONResponse(get_run_findings(db_path, run_id))
+    async def api_findings(run_id: int, severity: str | None = None):
+        """Filterable findings endpoint — e.g. ?severity=CRITICAL"""
+        return JSONResponse(get_run_findings(db_path, run_id, severity=severity))
+
+    # ── Async scan trigger ────────────────────────────────────────────────────
+
+    def _run_scan_background(scan_id: str, req: ScanRequest) -> None:
+        from pathlib import Path as _Path
+
+        from secureaudit.core.config import load_config
+        from secureaudit.core.engine import AuditEngine
+        from secureaudit.reports.history import save
+
+        try:
+            config_path = req.config or str(_Path(req.target) / "secureaudit.yml")
+            cfg = load_config(config_path)
+            engine = AuditEngine(cfg)
+            result = engine.run(req.target, req.plugins)
+
+            project = req.project or cfg.project
+            run_id = save(result, db_path, project=project)
+
+            app.state.pending_scans[scan_id] = {
+                "status": "completed", "run_id": run_id, "error": None,
+            }
+
+            if project:
+                from secureaudit.core.webhooks import check_and_fire_project_webhooks
+                check_and_fire_project_webhooks(db_path, project, run_id)
+        except Exception as exc:
+            app.state.pending_scans[scan_id] = {
+                "status": "failed", "run_id": None, "error": str(exc),
+            }
+
+    @app.post("/api/scan", dependencies=[Depends(verify_token)])
+    async def api_trigger_scan(req: ScanRequest, background_tasks: BackgroundTasks):
+        """Trigger a scan against `target`. Returns immediately with a scan_id
+        to poll via GET /api/scan/{scan_id} — the scan itself runs in the
+        background and is only persisted to history once it completes."""
+        scan_id = str(uuid.uuid4())
+        app.state.pending_scans[scan_id] = {"status": "running", "run_id": None, "error": None}
+        background_tasks.add_task(_run_scan_background, scan_id, req)
+        return {"scan_id": scan_id, "status": "running"}
+
+    @app.get("/api/scan/{scan_id}")
+    async def api_scan_status(scan_id: str):
+        pending = app.state.pending_scans.get(scan_id)
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Unknown scan_id")
+        return {"scan_id": scan_id, **pending}
+
+    # ── Project webhooks ──────────────────────────────────────────────────────
+
+    @app.post("/api/projects/{project_name}/webhooks", dependencies=[Depends(verify_token)])
+    async def api_register_webhook(project_name: str, body: WebhookRequest):
+        from secureaudit.core.webhooks import register_webhook
+        webhook_id = register_webhook(db_path, project_name, body.url)
+        return {"id": webhook_id, "project": project_name, "url": body.url}
+
+    @app.get("/api/projects/{project_name}/webhooks", dependencies=[Depends(verify_token)])
+    async def api_list_webhooks(project_name: str):
+        from secureaudit.core.webhooks import get_webhooks
+        return JSONResponse(get_webhooks(db_path, project_name))
+
+    @app.delete("/api/projects/{project_name}/webhooks/{webhook_id}", dependencies=[Depends(verify_token)])
+    async def api_delete_webhook(project_name: str, webhook_id: int):
+        from secureaudit.core.webhooks import delete_webhook
+        deleted = delete_webhook(db_path, webhook_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        return {"deleted": True, "id": webhook_id}
 
     return app

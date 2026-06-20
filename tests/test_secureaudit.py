@@ -2517,3 +2517,415 @@ class TestHistoryAndProjectsCLI:
 
             runs = get_runs(db)
             assert runs[0]["project"] == "my-project"
+
+
+# ── REST API: token auth ──────────────────────────────────────────────────────
+
+class TestDashboardAuth:
+    def _client(self, db, api_token=None, require_token=False):
+        from fastapi.testclient import TestClient
+
+        from secureaudit.dashboard.app import create_app
+        return TestClient(create_app(db, api_token=api_token, require_token=require_token))
+
+    def test_docs_enabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"))
+            r = client.get("/docs")
+            assert r.status_code == 200
+
+    def test_openapi_schema_available(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"))
+            r = client.get("/openapi.json")
+            assert r.status_code == 200
+            assert "/api/scan" in r.json()["paths"]
+
+    def test_localhost_mode_no_token_required_for_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target"
+            target.mkdir()
+            (target / "app.py").write_text("x = 1\n")
+            client = self._client(str(Path(d) / "audits.db"), require_token=False)
+            r = client.post("/api/scan", json={"target": str(target), "plugins": ["policy"]})
+            assert r.status_code == 200
+
+    def test_require_token_blocks_write_without_header(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"), api_token="secret", require_token=True)
+            r = client.post("/api/scan", json={"target": str(d)})
+            assert r.status_code == 401
+
+    def test_require_token_blocks_wrong_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"), api_token="secret", require_token=True)
+            r = client.post("/api/scan", json={"target": str(d)},
+                           headers={"Authorization": "Bearer wrong"})
+            assert r.status_code == 401
+
+    def test_require_token_accepts_correct_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target"
+            target.mkdir()
+            (target / "app.py").write_text("x = 1\n")
+            client = self._client(str(Path(d) / "audits.db"), api_token="secret", require_token=True)
+            r = client.post("/api/scan", json={"target": str(target), "plugins": ["policy"]},
+                           headers={"Authorization": "Bearer secret"})
+            assert r.status_code == 200
+
+    def test_read_endpoints_open_even_when_token_required(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"), api_token="secret", require_token=True)
+            r = client.get("/api/runs")
+            assert r.status_code == 200  # GET is never gated, per acceptance criteria
+
+    def test_require_token_with_no_token_configured_fails_closed(self):
+        """If require_token is True but no token was ever set (shouldn't happen
+        via the CLI, which auto-generates one, but defend the API directly),
+        write requests must fail rather than silently allow access."""
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"), api_token=None, require_token=True)
+            r = client.post("/api/scan", json={"target": str(d)})
+            assert r.status_code in (401, 503)
+
+
+# ── REST API: async scan trigger ─────────────────────────────────────────────
+
+class TestDashboardScanAPI:
+    def _client(self, db):
+        from fastapi.testclient import TestClient
+
+        from secureaudit.dashboard.app import create_app
+        return TestClient(create_app(db))
+
+    def test_scan_returns_immediately_with_scan_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target"
+            target.mkdir()
+            (target / "app.py").write_text("x = 1\n")
+            client = self._client(str(Path(d) / "audits.db"))
+
+            r = client.post("/api/scan", json={"target": str(target), "plugins": ["policy"]})
+            assert r.status_code == 200
+            data = r.json()
+            assert "scan_id" in data
+            assert data["status"] == "running"
+
+    def test_scan_completes_and_is_pollable(self):
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target"
+            target.mkdir()
+            (target / "app.py").write_text("x = 1\n")
+            client = self._client(str(Path(d) / "audits.db"))
+
+            scan_id = client.post(
+                "/api/scan", json={"target": str(target), "plugins": ["policy"]}
+            ).json()["scan_id"]
+
+            status = None
+            for _ in range(30):
+                r = client.get(f"/api/scan/{scan_id}")
+                status = r.json()
+                if status["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+            assert status["status"] == "completed"
+            assert status["run_id"] is not None
+
+    def test_scan_persists_to_history_with_project(self):
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target"
+            target.mkdir()
+            (target / "app.py").write_text("x = 1\n")
+            db = str(Path(d) / "audits.db")
+            client = self._client(db)
+
+            scan_id = client.post(
+                "/api/scan",
+                json={"target": str(target), "plugins": ["policy"], "project": "acme"},
+            ).json()["scan_id"]
+
+            for _ in range(30):
+                if client.get(f"/api/scan/{scan_id}").json()["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+            from secureaudit.reports.history import get_runs
+            runs = get_runs(db, project="acme")
+            assert len(runs) == 1
+
+    def test_unknown_scan_id_returns_404(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"))
+            r = client.get("/api/scan/nonexistent-id")
+            assert r.status_code == 404
+
+    def test_scan_failure_reported_not_crashed(self, monkeypatch):
+        """The architecture catches plugin errors per-plugin (BasePlugin.run()),
+        so a nonexistent target alone wouldn't actually raise. Simulate a real
+        failure point (e.g. AuditEngine.run itself blowing up) by monkeypatching
+        it directly, and confirm the background task reports 'failed' rather
+        than crashing the server or leaving the scan stuck as 'running' forever.
+        """
+        import time
+
+        from secureaudit.core.engine import AuditEngine
+
+        def boom(self, target, plugins=None):
+            raise RuntimeError("simulated engine failure")
+
+        monkeypatch.setattr(AuditEngine, "run", boom)
+
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"))
+            scan_id = client.post("/api/scan", json={"target": d}).json()["scan_id"]
+
+            status = None
+            for _ in range(30):
+                status = client.get(f"/api/scan/{scan_id}").json()
+                if status["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+            assert status["status"] == "failed"
+            assert "simulated engine failure" in status["error"]
+
+
+# ── REST API: filterable findings ────────────────────────────────────────────
+
+class TestFindingsSeverityFilter:
+    def test_get_run_findings_filters_by_severity(self):
+        from secureaudit.reports.history import get_run_findings, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            result = _make_result("/repo", n_findings=0)
+            pr = PluginResult(plugin="secrets")
+            pr.findings = [
+                Finding(plugin="secrets", title="Crit issue", severity=Severity.CRITICAL, description=""),
+                Finding(plugin="secrets", title="Low issue", severity=Severity.LOW, description=""),
+            ]
+            result.plugin_results = [pr]
+            run_id = save(result, db)
+
+            critical_only = get_run_findings(db, run_id, severity="CRITICAL")
+            assert len(critical_only) == 1
+            assert critical_only[0]["title"] == "Crit issue"
+
+    def test_severity_filter_case_insensitive(self):
+        from secureaudit.reports.history import get_run_findings, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            result = _make_result("/repo")
+            pr = PluginResult(plugin="secrets")
+            pr.findings = [Finding(plugin="secrets", title="X", severity=Severity.HIGH, description="")]
+            result.plugin_results = [pr]
+            run_id = save(result, db)
+
+            findings = get_run_findings(db, run_id, severity="high")
+            assert len(findings) == 1
+
+    def test_api_findings_endpoint_severity_query_param(self):
+        from fastapi.testclient import TestClient
+
+        from secureaudit.dashboard.app import create_app
+        from secureaudit.reports.history import save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            result = _make_result("/repo")
+            pr = PluginResult(plugin="secrets")
+            pr.findings = [
+                Finding(plugin="secrets", title="Crit", severity=Severity.CRITICAL, description=""),
+                Finding(plugin="secrets", title="Med", severity=Severity.MEDIUM, description=""),
+            ]
+            result.plugin_results = [pr]
+            run_id = save(result, db)
+
+            client = TestClient(create_app(db))
+            r = client.get(f"/api/runs/{run_id}/findings?severity=CRITICAL")
+            assert r.status_code == 200
+            data = r.json()
+            assert len(data) == 1
+            assert data[0]["title"] == "Crit"
+
+
+# ── Project webhooks ──────────────────────────────────────────────────────────
+
+class TestProjectWebhooks:
+    def test_register_and_get_webhooks(self):
+        from secureaudit.core.webhooks import get_webhooks, register_webhook
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            webhook_id = register_webhook(db, "acme", "https://example.com/hook")
+            hooks = get_webhooks(db, "acme")
+            assert len(hooks) == 1
+            assert hooks[0]["id"] == webhook_id
+            assert hooks[0]["url"] == "https://example.com/hook"
+
+    def test_get_webhooks_empty_for_unknown_project(self):
+        from secureaudit.core.webhooks import get_webhooks
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            assert get_webhooks(db, "nonexistent") == []
+
+    def test_delete_webhook(self):
+        from secureaudit.core.webhooks import delete_webhook, get_webhooks, register_webhook
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            webhook_id = register_webhook(db, "acme", "https://example.com/hook")
+            assert delete_webhook(db, webhook_id) is True
+            assert get_webhooks(db, "acme") == []
+
+    def test_delete_nonexistent_webhook_returns_false(self):
+        from secureaudit.core.webhooks import delete_webhook
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            assert delete_webhook(db, 999) is False
+
+    def test_no_webhooks_no_fire(self):
+        from secureaudit.core.webhooks import check_and_fire_project_webhooks
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo"), db, project="acme")
+            fired = check_and_fire_project_webhooks(db, "acme", 1)
+            assert fired == 0
+
+    def test_first_run_never_fires(self):
+        """No previous run to diff against — must not fire, and must not error."""
+        from secureaudit.core.webhooks import check_and_fire_project_webhooks, register_webhook
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            register_webhook(db, "acme", "http://localhost:1/unreachable")
+            run_id = save(_make_result("/repo", n_findings=3, severity=Severity.CRITICAL), db, project="acme")
+            fired = check_and_fire_project_webhooks(db, "acme", run_id)
+            assert fired == 0
+
+    def test_fires_on_new_critical_finding(self):
+        import http.server
+        import json as _json
+        import threading
+
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                body = self.rfile.read(length)
+                received.append(_json.loads(body))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            from secureaudit.core.webhooks import check_and_fire_project_webhooks, register_webhook
+            from secureaudit.reports.history import save
+            with tempfile.TemporaryDirectory() as d:
+                db = str(Path(d) / "audits.db")
+                register_webhook(db, "acme", f"http://127.0.0.1:{port}/hook")
+
+                run1 = save(_make_result("/repo", n_findings=0), db, project="acme")
+                check_and_fire_project_webhooks(db, "acme", run1)
+                assert len(received) == 0
+
+                run2 = save(
+                    _make_result("/repo", n_findings=1, severity=Severity.CRITICAL),
+                    db, project="acme",
+                )
+                fired = check_and_fire_project_webhooks(db, "acme", run2)
+                assert fired == 1
+                assert len(received) == 1
+                assert received[0]["project"] == "acme"
+                assert received[0]["new_findings_count"] == 1
+        finally:
+            server.shutdown()
+
+    def test_does_not_fire_without_new_regression(self):
+        from secureaudit.core.webhooks import check_and_fire_project_webhooks, register_webhook
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            register_webhook(db, "acme", "http://localhost:1/unreachable")
+
+            save(_make_result("/repo", n_findings=1, severity=Severity.LOW), db, project="acme")
+            run2 = save(_make_result("/repo", n_findings=1, severity=Severity.LOW), db, project="acme")
+            fired = check_and_fire_project_webhooks(db, "acme", run2)
+            assert fired == 0  # same LOW finding, no new CRITICAL/HIGH
+
+    def test_unreachable_webhook_does_not_raise(self):
+        from secureaudit.core.webhooks import check_and_fire_project_webhooks, register_webhook
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            register_webhook(db, "acme", "http://127.0.0.1:1/unreachable")
+
+            save(_make_result("/repo", n_findings=0), db, project="acme")
+            run2 = save(_make_result("/repo", n_findings=1, severity=Severity.CRITICAL), db, project="acme")
+            fired = check_and_fire_project_webhooks(db, "acme", run2)  # must not raise
+            assert fired == 0  # POST failed, correctly not counted as fired
+
+
+class TestWebhookAPIEndpoints:
+    def _client(self, db, **kwargs):
+        from fastapi.testclient import TestClient
+
+        from secureaudit.dashboard.app import create_app
+        return TestClient(create_app(db, **kwargs))
+
+    def test_register_webhook_via_api(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"))
+            r = client.post("/api/projects/acme/webhooks", json={"url": "https://example.com/hook"})
+            assert r.status_code == 200
+            assert r.json()["project"] == "acme"
+
+    def test_list_webhooks_via_api(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            client = self._client(db)
+            client.post("/api/projects/acme/webhooks", json={"url": "https://example.com/hook"})
+            r = client.get("/api/projects/acme/webhooks")
+            assert r.status_code == 200
+            assert len(r.json()) == 1
+
+    def test_delete_webhook_via_api(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            client = self._client(db)
+            webhook_id = client.post(
+                "/api/projects/acme/webhooks", json={"url": "https://example.com/hook"}
+            ).json()["id"]
+            r = client.delete(f"/api/projects/acme/webhooks/{webhook_id}")
+            assert r.status_code == 200
+
+    def test_webhook_endpoints_gated_by_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = self._client(str(Path(d) / "audits.db"), api_token="secret", require_token=True)
+            r = client.post("/api/projects/acme/webhooks", json={"url": "https://example.com/hook"})
+            assert r.status_code == 401
+
+
+# ── CLI: serve command token logic ───────────────────────────────────────────
+
+class TestServeCommandTokenLogic:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_serve_help_mentions_token(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["serve", "--help"])
+        assert result.exit_code == 0
+        assert "--token" in result.output

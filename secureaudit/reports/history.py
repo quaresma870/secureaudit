@@ -123,18 +123,25 @@ def get_runs(db_path: str | Path, limit: int = 20, project: str | None = None) -
     return [dict(r) for r in rows]
 
 
-def get_run_findings(db_path: str | Path, run_id: int, include_suppressed: bool = False) -> list[dict]:
+def get_run_findings(
+    db_path: str | Path,
+    run_id: int,
+    include_suppressed: bool = False,
+    severity: str | None = None,
+) -> list[dict]:
     conn = sqlite3.connect(str(db_path))
     _ensure_schema(conn)
     conn.row_factory = sqlite3.Row
-    if include_suppressed:
-        rows = conn.execute(
-            "SELECT * FROM findings WHERE run_id = ?", (run_id,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM findings WHERE run_id = ? AND suppressed = 0", (run_id,)
-        ).fetchall()
+
+    query = "SELECT * FROM findings WHERE run_id = ?"
+    params: list = [run_id]
+    if not include_suppressed:
+        query += " AND suppressed = 0"
+    if severity:
+        query += " AND severity = ?"
+        params.append(severity.upper())
+
+    rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -174,3 +181,19 @@ def get_project_run_count(db_path: str | Path, project: str) -> int:
     ).fetchone()[0]
     conn.close()
     return count
+
+
+def get_previous_run(db_path: str | Path, project: str, before_run_id: int) -> dict | None:
+    """Return the most recent run for `project` strictly before `before_run_id`,
+    or None if this is the first run for that project. Used by the webhook
+    diff check to avoid assuming the just-saved run is always runs()[0]
+    (which could race with a concurrent write)."""
+    conn = sqlite3.connect(str(db_path))
+    _ensure_schema(conn)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM runs WHERE project = ? AND id < ? ORDER BY id DESC LIMIT 1",
+        (project, before_run_id),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
