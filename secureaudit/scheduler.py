@@ -97,7 +97,7 @@ def run_schedule(
         run_id = None
         if db:
             from secureaudit.reports.history import save
-            run_id = save(result, db)
+            run_id = save(result, db, project=cfg.project)
             console.print(f"[green]✔[/green] Saved to {db} (run #{run_id})")
 
         # HTML report

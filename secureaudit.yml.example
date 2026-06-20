@@ -19,6 +19,10 @@ plugins:
 # Fail CI if score drops below this
 fail_below: 70
 
+# Optional — groups this target's scan history with others under one name
+# for a portfolio view (secureaudit projects --db audits.db)
+# project: my-app
+
 # Paths to exclude from scanning
 exclude_paths:
   - .git

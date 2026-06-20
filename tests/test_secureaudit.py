@@ -2186,3 +2186,334 @@ class TestCacheCLI:
             data1 = _json.loads(json1.read_text())
             data2 = _json.loads(json2.read_text())
             assert data1["severity_counts"] == data2["severity_counts"]
+
+
+# ── Project grouping ──────────────────────────────────────────────────────────
+
+def _make_result(target: str, n_findings: int = 0, severity=Severity.MEDIUM) -> AuditResult:
+    r = AuditResult(target=target)
+    pr = PluginResult(plugin="secrets")
+    pr.findings = [
+        Finding(plugin="secrets", title=f"Issue {i}", severity=severity, description="")
+        for i in range(n_findings)
+    ]
+    r.plugin_results = [pr]
+    return r
+
+
+class TestConfigProject:
+    def test_project_none_by_default(self):
+        cfg = load_config(None)
+        assert cfg.project is None
+
+    def test_project_read_from_config(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write("project: acme-corp\n")
+            path = f.name
+        try:
+            cfg = load_config(path)
+            assert cfg.project == "acme-corp"
+        finally:
+            os.unlink(path)
+
+
+class TestHistoryProjectGrouping:
+    def test_save_with_project(self):
+        from secureaudit.reports.history import get_runs, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            runs = get_runs(db)
+            assert runs[0]["project"] == "acme"
+
+    def test_save_without_project_is_null(self):
+        from secureaudit.reports.history import get_runs, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db)
+            runs = get_runs(db)
+            assert runs[0]["project"] is None
+
+    def test_get_runs_filters_by_project(self):
+        from secureaudit.reports.history import get_runs, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db, project="widgets")
+            save(_make_result("/repo/c"), db)
+
+            acme_runs = get_runs(db, project="acme")
+            assert len(acme_runs) == 1
+            assert acme_runs[0]["target"] == "/repo/a"
+
+    def test_get_runs_without_project_filter_returns_all(self):
+        from secureaudit.reports.history import get_runs, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db)
+            assert len(get_runs(db)) == 2
+
+    def test_old_schema_database_migrates_automatically(self):
+        """Backward compatibility: a database created before the project
+        column existed must still work with the new code, unmodified by hand."""
+        import sqlite3
+
+        from secureaudit.reports.history import get_runs, save
+
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "old.db")
+            conn = sqlite3.connect(db)
+            conn.executescript("""
+                CREATE TABLE runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target TEXT NOT NULL, timestamp TEXT NOT NULL,
+                    score INTEGER NOT NULL, grade TEXT NOT NULL,
+                    total_findings INTEGER NOT NULL, critical_high INTEGER NOT NULL,
+                    suppressed_count INTEGER NOT NULL DEFAULT 0,
+                    duration_ms REAL NOT NULL, plugins TEXT NOT NULL
+                );
+            """)
+            conn.execute(
+                "INSERT INTO runs (target, timestamp, score, grade, total_findings, "
+                "critical_high, duration_ms, plugins) VALUES (?,?,?,?,?,?,?,?)",
+                ("/old/repo", "2025-01-01T00:00:00", 85, "B", 3, 1, 120.0, '["secrets"]'),
+            )
+            conn.commit()
+            conn.close()
+
+            runs = get_runs(db)
+            assert len(runs) == 1
+            assert runs[0]["project"] is None  # migrated column defaults to NULL
+
+            save(_make_result("/new/repo"), db, project="fresh")
+            assert len(get_runs(db)) == 2
+
+
+class TestGetProjects:
+    def test_returns_one_row_per_project_latest_run(self):
+        from secureaudit.reports.history import get_projects, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a", n_findings=2), db, project="acme")
+            save(_make_result("/repo/a", n_findings=0), db, project="acme")  # latest, clean
+            save(_make_result("/repo/b", n_findings=1), db, project="widgets")
+
+            projects = get_projects(db)
+            assert len(projects) == 2
+            acme = next(p for p in projects if p["project"] == "acme")
+            assert acme["total_findings"] == 0  # the latest acme run, not the first
+
+    def test_excludes_ungrouped_runs(self):
+        from secureaudit.reports.history import get_projects, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db)  # ungrouped
+            projects = get_projects(db)
+            assert len(projects) == 1
+            assert projects[0]["project"] == "acme"
+
+    def test_empty_database_returns_empty_list(self):
+        from secureaudit.reports.history import get_projects, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db)  # only an ungrouped run exists
+            assert get_projects(db) == []
+
+    def test_get_project_run_count(self):
+        from secureaudit.reports.history import get_project_run_count, save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/a"), db, project="acme")
+            assert get_project_run_count(db, "acme") == 3
+            assert get_project_run_count(db, "nonexistent") == 0
+
+
+# ── Dashboard project routes ──────────────────────────────────────────────────
+
+class TestDashboardProjects:
+    def _client(self, db):
+        from fastapi.testclient import TestClient
+
+        from secureaudit.dashboard.app import create_app
+        return TestClient(create_app(db))
+
+    def test_projects_page_lists_projects(self):
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db, project="widgets")
+
+            client = self._client(db)
+            r = client.get("/projects")
+            assert r.status_code == 200
+            assert "acme" in r.text
+            assert "widgets" in r.text
+
+    def test_projects_page_empty_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            import sqlite3
+
+            from secureaudit.reports.history import _ensure_schema
+            conn = sqlite3.connect(db)
+            _ensure_schema(conn)
+            conn.close()
+
+            client = self._client(db)
+            r = client.get("/projects")
+            assert r.status_code == 200
+            assert "No projects yet" in r.text
+
+    def test_project_detail_shows_trend(self):
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a", n_findings=2), db, project="acme")
+            save(_make_result("/repo/a", n_findings=0), db, project="acme")
+
+            client = self._client(db)
+            r = client.get("/projects/acme")
+            assert r.status_code == 200
+            assert "Score Trend" in r.text
+
+    def test_project_detail_404_when_no_runs(self):
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+
+            client = self._client(db)
+            r = client.get("/projects/does-not-exist")
+            assert r.status_code == 404
+
+    def test_api_projects_endpoint(self):
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db)  # ungrouped — must not appear
+
+            client = self._client(db)
+            r = client.get("/api/projects")
+            assert r.status_code == 200
+            data = r.json()
+            assert len(data) == 1
+            assert data[0]["project"] == "acme"
+
+    def test_api_runs_filters_by_project_query_param(self):
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db, project="widgets")
+
+            client = self._client(db)
+            r = client.get("/api/runs?project=acme")
+            data = r.json()
+            assert len(data) == 1
+            assert data[0]["project"] == "acme"
+
+    def test_index_links_to_projects(self):
+        from secureaudit.reports.history import save
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db)
+
+            client = self._client(db)
+            r = client.get("/")
+            assert 'href="/projects"' in r.text
+
+
+# ── CLI: history and projects commands ───────────────────────────────────────
+
+class TestHistoryAndProjectsCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_history_command_basic(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db)
+            result = runner.invoke(cli, ["history", "--db", db])
+            assert result.exit_code == 0, result.output
+            assert "/repo/a" in result.output
+
+    def test_history_command_filters_by_project(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db, project="widgets")
+
+            result = runner.invoke(cli, ["history", "--db", db, "--project", "acme"])
+            assert result.exit_code == 0
+            assert "/repo/a" in result.output
+            assert "/repo/b" not in result.output
+
+    def test_history_command_missing_db(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["history", "--db", "/nonexistent/audits.db"])
+        assert result.exit_code != 0
+
+    def test_history_command_no_runs_for_project(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            result = runner.invoke(cli, ["history", "--db", db, "--project", "nonexistent"])
+            assert result.exit_code == 0
+            assert "No runs found" in result.output
+
+    def test_projects_command_lists_projects(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db, project="acme")
+            save(_make_result("/repo/b"), db, project="widgets")
+
+            result = runner.invoke(cli, ["projects", "--db", db])
+            assert result.exit_code == 0
+            assert "acme" in result.output
+            assert "widgets" in result.output
+
+    def test_projects_command_empty(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            db = str(Path(d) / "audits.db")
+            save(_make_result("/repo/a"), db)  # ungrouped only
+            result = runner.invoke(cli, ["projects", "--db", db])
+            assert result.exit_code == 0
+            assert "No projects found" in result.output
+
+    def test_scan_with_db_and_project_in_config(self):
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import get_runs
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 1\n")
+            Path(d, "secureaudit.yml").write_text("plugins: [policy]\nproject: my-project\n")
+            db = str(Path(d) / "audits.db")
+
+            result = runner.invoke(cli, ["scan", d, "--db", db, "--no-terminal", "--fail-below", "0"])
+            assert result.exit_code == 0, result.output
+
+            runs = get_runs(db)
+            assert runs[0]["project"] == "my-project"

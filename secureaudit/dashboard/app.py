@@ -8,7 +8,12 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from secureaudit.reports.history import get_run_findings, get_runs
+from secureaudit.reports.history import (
+    get_project_run_count,
+    get_projects,
+    get_run_findings,
+    get_runs,
+)
 
 _CSS = """
 <style>
@@ -66,7 +71,7 @@ def create_app(db_path: str) -> FastAPI:
         return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>SecureAudit Dashboard</title>{_CSS}</head><body>
 <h1>🔐 SecureAudit</h1>
-<p class="sub">Audit history — <a href="/api/runs">JSON API</a></p>
+<p class="sub">Audit history — <a href="/projects">Projects</a> — <a href="/api/runs">JSON API</a></p>
 <div class="card">
 <h2>Recent Runs</h2>
 <table><tr><th>#</th><th>Target</th><th>Timestamp</th><th>Score</th><th>Grade</th><th>High+Critical</th><th>Total entries</th></tr>
@@ -114,9 +119,113 @@ def create_app(db_path: str) -> FastAPI:
 <footer>SecureAudit Dashboard</footer>
 </body></html>""")
 
+    @app.get("/projects", response_class=HTMLResponse)
+    async def projects_index():
+        rows_data = get_projects(db_path)
+        rows = ""
+        for r in rows_data:
+            grade = r["grade"]
+            score_color = "ok" if r["score"] >= 75 else "medium" if r["score"] >= 60 else "critical"
+            run_count = get_project_run_count(db_path, r["project"])
+            rows += (
+                f'<tr><td><a href="/projects/{r["project"]}">{r["project"]}</a></td>'
+                f'<td style="color:var(--{score_color})">{r["score"]}</td>'
+                f'<td class="grade grade-{grade}">{grade}</td>'
+                f'<td>{run_count}</td>'
+                f'<td>{r["timestamp"][:16]}</td></tr>\n'
+            )
+
+        if not rows:
+            rows = (
+                '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:2rem">'
+                "No projects yet. Add <code>project: your-name</code> to secureaudit.yml "
+                "and scan with <code>--db</code>.</td></tr>"
+            )
+
+        return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Projects — SecureAudit Dashboard</title>{_CSS}</head><body>
+<p><a href="/">← All runs</a></p>
+<h1>📁 Projects</h1>
+<p class="sub">Portfolio overview — latest score per project</p>
+<div class="card">
+<table><tr><th>Project</th><th>Latest Score</th><th>Grade</th><th>Runs</th><th>Last scan</th></tr>
+{rows}</table></div>
+<footer>SecureAudit Dashboard</footer>
+</body></html>""")
+
+    @app.get("/projects/{project_name}", response_class=HTMLResponse)
+    async def project_detail(project_name: str):
+        runs = get_runs(db_path, limit=100, project=project_name)
+        if not runs:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        rows = ""
+        for r in runs:
+            grade = r["grade"]
+            score_color = "ok" if r["score"] >= 75 else "medium" if r["score"] >= 60 else "critical"
+            rows += (
+                f'<tr><td><a href="/run/{r["id"]}">#{r["id"]}</a></td>'
+                f'<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">{r["target"]}</td>'
+                f'<td>{r["timestamp"][:16]}</td>'
+                f'<td style="color:var(--{score_color})">{r["score"]}</td>'
+                f'<td class="grade grade-{grade}">{grade}</td>'
+                f'<td style="color:var(--critical)">{r["critical_high"]}</td></tr>\n'
+            )
+
+        # Trend: oldest → newest for the chart, runs themselves stay newest-first in the table
+        trend = list(reversed(runs))
+        labels = [r["timestamp"][:10] for r in trend]
+        scores = [r["score"] for r in trend]
+
+        latest = runs[0]
+        return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>{project_name} — SecureAudit Dashboard</title>{_CSS}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head><body>
+<p><a href="/projects">← All projects</a></p>
+<h1>📁 {project_name}</h1>
+<p class="sub">{len(runs)} run(s) — latest grade <span class="grade grade-{latest["grade"]}">{latest["grade"]}</span></p>
+<div class="card">
+<h2>Score Trend</h2>
+<div style="height:220px;position:relative"><canvas id="trendChart"></canvas></div>
+</div>
+<div class="card">
+<h2>Runs</h2>
+<table><tr><th>#</th><th>Target</th><th>Timestamp</th><th>Score</th><th>Grade</th><th>High+Critical</th></tr>
+{rows}</table></div>
+<footer>SecureAudit Dashboard</footer>
+<script>
+new Chart(document.getElementById('trendChart'), {{
+  type: 'line',
+  data: {{
+    labels: {labels!r},
+    datasets: [{{
+      label: 'Score',
+      data: {scores!r},
+      borderColor: '#4f8ef7',
+      backgroundColor: '#4f8ef722',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 3,
+    }}]
+  }},
+  options: {{
+    responsive: true, maintainAspectRatio: false,
+    scales: {{ y: {{ min: 0, max: 100, ticks: {{ color: '#64748b' }} }},
+               x: {{ ticks: {{ color: '#64748b' }} }} }},
+    plugins: {{ legend: {{ display: false }} }}
+  }}
+}});
+</script>
+</body></html>""")
+
     @app.get("/api/runs")
-    async def api_runs(limit: int = 20):
-        return JSONResponse(get_runs(db_path, limit=limit))
+    async def api_runs(limit: int = 20, project: str | None = None):
+        return JSONResponse(get_runs(db_path, limit=limit, project=project))
+
+    @app.get("/api/projects")
+    async def api_projects():
+        return JSONResponse(get_projects(db_path))
 
     @app.get("/api/runs/{run_id}/findings")
     async def api_findings(run_id: int):

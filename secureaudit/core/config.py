@@ -86,6 +86,12 @@ class Config:
     def exclude_paths(self) -> list[str]:
         return self._data.get("exclude_paths", _DEFAULTS["exclude_paths"])
 
+    @property
+    def project(self) -> str | None:
+        """Optional project name to group this target's scan history under.
+        None means the run stays ungrouped, exactly as before this feature existed."""
+        return self._data.get("project")
+
     def plugin_config(self, plugin: str) -> dict[str, Any]:
         return self._data.get(plugin, _DEFAULTS.get(plugin, {}))
 
