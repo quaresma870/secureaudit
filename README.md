@@ -119,6 +119,10 @@ secureaudit cache clear .
 # Force a full rescan, bypassing the cache
 secureaudit scan . --no-cache
 
+# Group runs under a project (add 'project: my-app' to secureaudit.yml first)
+secureaudit history --db audits.db --project my-app
+secureaudit projects --db audits.db
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -228,6 +232,17 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.3.0
+- feat: project grouping — `project: name` in `secureaudit.yml` ties multiple repos/targets
+  to one named project for portfolio-style aggregation — closes #20
+  - `secureaudit history --db audits.db --project name` — filter CLI history by project
+  - `secureaudit projects --db audits.db` — list all projects with latest score/grade
+  - Dashboard: `GET /projects` (portfolio list) + `GET /projects/{name}` (score trend chart)
+  - `GET /api/projects` and `GET /api/runs?project=name` JSON endpoints
+  - Fully backward compatible: existing `audits.db` files migrate automatically (the `project`
+    column is added via `ALTER TABLE` on first use); omitting `project:` keeps runs ungrouped
+    exactly as before
 
 ### v1.2.0
 - feat: incremental scan caching for `secrets`, `sast`, and `policy` (Dockerfile/CI checks) — closes #23

@@ -216,7 +216,7 @@ def scan(
 
     if db:
         from secureaudit.reports.history import save
-        run_id = save(result, db)
+        run_id = save(result, db, project=cfg.project)
         console.print(f"[green]✔[/green] Saved to [bold]{db}[/bold] (run #{run_id})")
 
     if result.score < threshold:
@@ -593,6 +593,76 @@ def cache_status(target):
     console.print(f"[bold]Cache:[/bold] {path}")
     console.print(f"  Entries: {c.entry_count}")
     console.print(f"  Size: {size_kb:.1f} KB")
+
+
+@cli.command()
+@click.option("--db", required=True, help="SQLite database with audit history.")
+@click.option("--project", default=None, help="Only show runs belonging to this project.")
+@click.option("--limit", default=20, show_default=True, help="Number of runs to show.")
+def history(db, project, limit):
+    """Show recent scan runs from history, optionally filtered by --project."""
+    from secureaudit.reports.history import get_runs
+
+    if not Path(db).exists():
+        console.print(f"[red]Database not found: {db}[/red]")
+        sys.exit(1)
+
+    runs = get_runs(db, limit=limit, project=project)
+    if not runs:
+        msg = f"No runs found for project '{project}'." if project else "No runs recorded yet."
+        console.print(f"[yellow]{msg}[/yellow]")
+        return
+
+    title = f"History — project: {project}" if project else "History"
+    t = Table(title=title, box=box.SIMPLE_HEAD)
+    t.add_column("#", width=6)
+    t.add_column("Target", overflow="fold")
+    t.add_column("Project")
+    t.add_column("Timestamp")
+    t.add_column("Score", justify="right")
+    t.add_column("Grade")
+    t.add_column("Crit+High", justify="right")
+    for r in runs:
+        score_color = "green" if r["score"] >= 90 else "yellow" if r["score"] >= 60 else "red"
+        t.add_row(
+            str(r["id"]), r["target"], r["project"] or "[dim]—[/dim]", r["timestamp"][:16],
+            f"[{score_color}]{r['score']}[/]", r["grade"], str(r["critical_high"]),
+        )
+    console.print(t)
+
+
+@cli.command()
+@click.option("--db", required=True, help="SQLite database with audit history.")
+def projects(db):
+    """List all named projects with their latest score — a portfolio overview."""
+    from secureaudit.reports.history import get_project_run_count, get_projects
+
+    if not Path(db).exists():
+        console.print(f"[red]Database not found: {db}[/red]")
+        sys.exit(1)
+
+    rows = get_projects(db)
+    if not rows:
+        console.print(
+            "[yellow]No projects found.[/yellow] Add 'project: name' to secureaudit.yml "
+            "and run a scan with --db to start grouping runs."
+        )
+        return
+
+    t = Table(title="Projects", box=box.SIMPLE_HEAD)
+    t.add_column("Project")
+    t.add_column("Latest Score", justify="right")
+    t.add_column("Grade")
+    t.add_column("Runs", justify="right")
+    t.add_column("Last scan")
+    for r in rows:
+        score_color = "green" if r["score"] >= 90 else "yellow" if r["score"] >= 60 else "red"
+        run_count = get_project_run_count(db, r["project"])
+        t.add_row(
+            r["project"], f"[{score_color}]{r['score']}[/]", r["grade"],
+            str(run_count), r["timestamp"][:16],
+        )
+    console.print(t)
 
 
 def _print_diff(result) -> None:
