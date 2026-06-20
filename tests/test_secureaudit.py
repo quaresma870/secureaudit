@@ -2929,3 +2929,452 @@ class TestServeCommandTokenLogic:
         result = runner.invoke(cli, ["serve", "--help"])
         assert result.exit_code == 0
         assert "--token" in result.output
+
+
+# ── Compliance: OWASP ASVS mapping ───────────────────────────────────────────
+
+class TestOWASPASVSControls:
+    def test_at_least_15_controls_defined(self):
+        """Acceptance criteria: at least 15 working ASVS control mappings."""
+        from secureaudit.compliance.owasp_asvs import CONTROLS
+        assert len(CONTROLS) >= 15
+
+    def test_all_controls_have_required_fields(self):
+        from secureaudit.compliance.owasp_asvs import CONTROLS
+        for control in CONTROLS:
+            assert control.id.startswith("V")
+            assert control.chapter
+            assert control.description
+            assert len(control.plugins) > 0
+
+    def test_all_referenced_plugins_actually_exist(self):
+        """Every plugin name referenced by a control must be a real, registered plugin —
+        otherwise the mapping would silently never apply to anything."""
+        from secureaudit.compliance.owasp_asvs import CONTROLS
+        from secureaudit.plugins import available_plugins
+
+        registered = set(available_plugins())
+        for control in CONTROLS:
+            for plugin_name in control.plugins:
+                assert plugin_name in registered, f"{control.id} references unknown plugin {plugin_name!r}"
+
+
+class TestOWASPASVSEvaluate:
+    def _run(self, target, plugins):
+        cfg = load_config(None)
+        engine = AuditEngine(cfg)
+        return engine.run(target, plugins=plugins)
+
+    def test_returns_one_row_per_control(self):
+        from secureaudit.compliance.owasp_asvs import CONTROLS, evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            assert len(rows) == len(CONTROLS)
+
+    def test_not_applicable_when_plugin_not_run(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["policy"])  # secrets plugin never runs
+            rows = evaluate(result)
+            secrets_control = next(r for r in rows if r["id"] == "V6.4.1")
+            assert secrets_control["status"] == "NOT_APPLICABLE"
+
+    def test_fail_when_secret_detected(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            result = self._run(d, ["secrets"])
+            rows = evaluate(result)
+            secrets_control = next(r for r in rows if r["id"] == "V6.4.1")
+            assert secrets_control["status"] == "FAIL"
+            assert secrets_control["evidence_count"] == 1
+
+    def test_pass_when_plugin_ran_clean(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("def hello(): return 1\n")
+            result = self._run(d, ["secrets"])
+            rows = evaluate(result)
+            secrets_control = next(r for r in rows if r["id"] == "V6.4.1")
+            assert secrets_control["status"] == "PASS"
+            assert secrets_control["evidence_count"] == 0
+
+    def test_suppressed_findings_do_not_count_as_fail(self):
+        """A baselined/suppressed finding shouldn't count as a compliance failure —
+        consistent with how it's excluded from the score."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.baseline import apply_suppressions, save_baseline
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+
+            result1 = self._run(target, ["secrets"])
+            bpath = target / ".secureaudit-baseline.json"
+            save_baseline(bpath, result1.all_findings, str(target))
+
+            result2 = self._run(target, ["secrets"])
+            apply_suppressions(result2, target=target, baseline_path=bpath)
+
+            rows = evaluate(result2)
+            secrets_control = next(r for r in rows if r["id"] == "V6.4.1")
+            assert secrets_control["status"] == "PASS"
+
+    def test_dockerfile_root_fails_hardening_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / ".gitignore").write_text("*.env\n")
+            (target / "Dockerfile").write_text("FROM python:3.11\nCMD python app.py\n")
+            result = self._run(target, ["policy"])
+            rows = evaluate(result)
+            hardening = next(r for r in rows if r["id"] == "V14.1.3")
+            assert hardening["status"] == "FAIL"
+
+    def test_unpinned_dependencies_fail_freshness_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / ".gitignore").write_text("*.env\n")
+            (target / "requirements.txt").write_text("flask\nrequests\n")
+            result = self._run(target, ["policy"])
+            rows = evaluate(result)
+            freshness = next(r for r in rows if r["id"] == "V14.2.1")
+            assert freshness["status"] == "FAIL"
+
+    def test_ci_hardcoded_secret_fails_pipeline_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / ".gitignore").write_text("*.env\n")
+            wf_dir = target / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "ci.yml").write_text(
+                "on: pull_request_target\njobs:\n  test:\n    steps:\n"
+                "      - uses: actions/checkout@v4\n        with:\n          ref: head\n"
+            )
+            result = self._run(target, ["policy"])
+            rows = evaluate(result)
+            pipeline = next(r for r in rows if r["id"] == "V14.3.2")
+            assert pipeline["status"] == "FAIL"
+
+    def test_http_missing_hsts_fails_correct_control_only(self):
+        """A missing HSTS header must fail V14.4.5 specifically, not the
+        generic V14.4.1 'other headers' bucket — the matchers must not overlap."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="http")
+        pr.findings = [
+            Finding(plugin="http", title="Missing header: Strict-Transport-Security",
+                   severity=Severity.HIGH, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        hsts = next(r for r in rows if r["id"] == "V14.4.5")
+        other_headers = next(r for r in rows if r["id"] == "V14.4.1")
+        assert hsts["status"] == "FAIL"
+        assert other_headers["status"] == "PASS"  # not double-counted
+
+    def test_http_missing_csp_fails_correct_control_only(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="http")
+        pr.findings = [
+            Finding(plugin="http", title="Missing header: Content-Security-Policy",
+                   severity=Severity.MEDIUM, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        csp = next(r for r in rows if r["id"] == "V14.4.3")
+        hsts = next(r for r in rows if r["id"] == "V14.4.5")
+        assert csp["status"] == "FAIL"
+        assert hsts["status"] == "PASS"
+
+    def test_http_other_header_buckets_correctly(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="http")
+        pr.findings = [
+            Finding(plugin="http", title="Missing header: X-Frame-Options",
+                   severity=Severity.MEDIUM, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        other = next(r for r in rows if r["id"] == "V14.4.1")
+        hsts = next(r for r in rows if r["id"] == "V14.4.5")
+        assert other["status"] == "FAIL"
+        assert hsts["status"] == "PASS"
+
+    def test_ssl_issue_fails_tls_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="http")
+        pr.findings = [
+            Finding(plugin="http", title="SSL certificate expired: example.com",
+                   severity=Severity.CRITICAL, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        tls = next(r for r in rows if r["id"] == "V9.1.1")
+        assert tls["status"] == "FAIL"
+
+    def test_cors_finding_fails_cors_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="cors")
+        pr.findings = [
+            Finding(plugin="cors", title="CORS: wildcard origin + credentials — https://api.example.com",
+                   severity=Severity.CRITICAL, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        cors_control = next(r for r in rows if r["id"] == "V14.5.3")
+        assert cors_control["status"] == "FAIL"
+
+    def test_sast_sqli_fails_injection_control_only(self):
+        """A SQLi finding must fail V5.3.5 specifically, not V5.3.4 (XSS) or
+        V12.5.1 (traversal) — the rule_id-based matchers must not cross-fire."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="sast")
+        pr.findings = [
+            Finding(plugin="sast", title="SAST: sql-injection", severity=Severity.CRITICAL,
+                   description="", extra={"rule_id": "python.lang.security.audit.sql-injection"}),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        injection = next(r for r in rows if r["id"] == "V5.3.5")
+        xss = next(r for r in rows if r["id"] == "V5.3.4")
+        traversal = next(r for r in rows if r["id"] == "V12.5.1")
+        assert injection["status"] == "FAIL"
+        assert xss["status"] == "PASS"
+        assert traversal["status"] == "PASS"
+
+    def test_sast_xss_fails_xss_control_only(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="sast")
+        pr.findings = [
+            Finding(plugin="sast", title="SAST: xss-vulnerability", severity=Severity.HIGH,
+                   description="", extra={"rule_id": "javascript.lang.security.audit.xss"}),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        xss = next(r for r in rows if r["id"] == "V5.3.4")
+        injection = next(r for r in rows if r["id"] == "V5.3.5")
+        assert xss["status"] == "FAIL"
+        assert injection["status"] == "PASS"
+
+    def test_trivy_cve_finding_counts_toward_dependency_freshness_only(self):
+        """A trivy CVE finding (has 'package' in extra) must count toward
+        V14.2.1, but a trivy IaC finding (has 'check_id') must not."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="trivy")
+        pr.findings = [
+            Finding(plugin="trivy", title="CVE-2024-0001 in libfoo 1.0", severity=Severity.HIGH,
+                   description="", extra={"package": "libfoo", "installed": "1.0", "fixed": "1.1"}),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        freshness = next(r for r in rows if r["id"] == "V14.2.1")
+        hardening = next(r for r in rows if r["id"] == "V14.1.3")
+        assert freshness["status"] == "FAIL"
+        assert hardening["status"] == "PASS"  # IaC-specific control unaffected by a CVE finding
+
+    def test_trivy_iac_finding_counts_toward_hardening_only(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="trivy")
+        pr.findings = [
+            Finding(plugin="trivy", title="IaC misconfig: missing USER", severity=Severity.HIGH,
+                   description="", extra={"check_id": "DS002"}),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        hardening = next(r for r in rows if r["id"] == "V14.1.3")
+        freshness = next(r for r in rows if r["id"] == "V14.2.1")
+        assert hardening["status"] == "FAIL"
+        assert freshness["status"] == "PASS"
+
+    def test_malware_finding_fails_malware_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="malware")
+        pr.findings = [
+            Finding(plugin="malware", title="Malware detected: Eicar-Test-Signature",
+                   severity=Severity.CRITICAL, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        malware_control = next(r for r in rows if r["id"] == "V10.3.2")
+        assert malware_control["status"] == "FAIL"
+
+    def test_git_history_finding_fails_history_control(self):
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="git_history")
+        pr.findings = [
+            Finding(plugin="git_history", title="Historical secret: AWS Access Key",
+                   severity=Severity.CRITICAL, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        history_control = next(r for r in rows if r["id"] == "V1.4.1")
+        assert history_control["status"] == "FAIL"
+
+    def test_info_only_findings_never_cause_fail(self):
+        """Plugins' own 'all clear' INFO findings (e.g. 'No CORS misconfigurations
+        found') must never be mistaken for evidence of a compliance failure."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="cors")
+        pr.findings = [
+            Finding(plugin="cors", title="No CORS misconfigurations found",
+                   severity=Severity.INFO, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        cors_control = next(r for r in rows if r["id"] == "V14.5.3")
+        assert cors_control["status"] == "PASS"
+
+    def test_malware_info_clean_finding_never_causes_fail(self):
+        """Regression: malware plugin's 'No malware detected' INFO finding was
+        incorrectly counted as failure evidence before the global INFO exclusion fix."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="malware")
+        pr.findings = [
+            Finding(plugin="malware", title="No malware detected", severity=Severity.INFO, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        malware_control = next(r for r in rows if r["id"] == "V10.3.2")
+        assert malware_control["status"] == "PASS"
+
+    def test_git_history_info_clean_finding_never_causes_fail(self):
+        """Regression: same bug class as malware/cors — 'No secrets found in
+        git history' is INFO, not evidence of a failed control."""
+        from secureaudit.compliance.owasp_asvs import evaluate
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+
+        result = AuditResult(target="/tmp/test")
+        pr = PluginResult(plugin="git_history")
+        pr.findings = [
+            Finding(plugin="git_history", title="No secrets found in git history",
+                   severity=Severity.INFO, description=""),
+        ]
+        result.plugin_results = [pr]
+
+        rows = evaluate(result)
+        history_control = next(r for r in rows if r["id"] == "V1.4.1")
+        assert history_control["status"] == "PASS"
+
+
+class TestComplianceFrameworkRegistry:
+    def test_owasp_asvs_registered(self):
+        from secureaudit.compliance import FRAMEWORKS
+        assert "owasp-asvs" in FRAMEWORKS
+
+    def test_registry_function_matches_module_function(self):
+        from secureaudit.compliance import FRAMEWORKS
+        from secureaudit.compliance.owasp_asvs import evaluate
+        assert FRAMEWORKS["owasp-asvs"] is evaluate
+
+
+class TestComplianceCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_compliance_report_flag_runs_without_error(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "secrets,policy", "--fail-below", "0",
+                "--compliance-report", "owasp-asvs",
+            ])
+            assert result.exit_code == 0, result.output
+            assert "Compliance" in result.output
+            assert "V6.4.1" in result.output
+
+    def test_compliance_output_writes_json(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            out_path = Path(d) / "compliance.json"
+
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "secrets", "--fail-below", "0",
+                "--compliance-report", "owasp-asvs", "--compliance-output", str(out_path),
+            ])
+            assert result.exit_code == 0, result.output
+            assert out_path.exists()
+
+            import json as _json
+            data = _json.loads(out_path.read_text())
+            assert len(data) >= 15
+            assert all("status" in row for row in data)
+
+    def test_compliance_report_invalid_framework_rejected(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            result = runner.invoke(cli, [
+                "scan", d, "--fail-below", "0", "--compliance-report", "not-a-real-framework",
+            ])
+            assert result.exit_code != 0
+
+    def test_no_compliance_flag_means_no_compliance_section(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = runner.invoke(cli, ["scan", d, "--plugins", "policy", "--fail-below", "0"])
+            assert result.exit_code == 0
+            assert "Compliance" not in result.output

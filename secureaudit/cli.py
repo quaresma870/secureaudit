@@ -138,10 +138,16 @@ def init(target, yes, force, baseline):
 @click.option("--dashboard-url", default=None, help="Link included in Slack/Teams messages (e.g. dashboard run URL)")
 @click.option("--no-cache", is_flag=True,
               help="Disable incremental file-result caching — forces a full rescan of every file.")
+@click.option("--compliance-report", default=None,
+              type=click.Choice(["owasp-asvs"]),
+              help="Show a control-by-control compliance breakdown for the given framework.")
+@click.option("--compliance-output", default=None,
+              help="Write the compliance breakdown as JSON to this path.")
 def scan(
     target, config, plugins, output, json_out, sarif_out, db, fail_below,
     no_terminal, baseline_file, no_baseline, no_inline_suppress,
     alert_slack, alert_teams, dashboard_url, no_cache,
+    compliance_report, compliance_output,
 ):
     """Run a security audit on TARGET (default: current directory)."""
 
@@ -186,6 +192,16 @@ def scan(
 
     if not no_terminal:
         _print_result(result, threshold)
+
+    if compliance_report:
+        from secureaudit.compliance import FRAMEWORKS
+        rows = FRAMEWORKS[compliance_report](result)
+        if not no_terminal:
+            _print_compliance(rows, compliance_report)
+        if compliance_output:
+            import json as _json
+            Path(compliance_output).write_text(_json.dumps(rows, indent=2))
+            console.print(f"[green]✔[/green] Compliance report: [bold]{compliance_output}[/bold]")
 
     if output:
         from secureaudit.reports.html import write_html
@@ -697,6 +713,49 @@ def projects(db):
             str(run_count), r["timestamp"][:16],
         )
     console.print(t)
+
+
+_FRAMEWORK_DISPLAY_NAMES = {
+    "owasp-asvs": "OWASP ASVS v4.0.3",
+}
+
+_COMPLIANCE_STATUS_COLOR = {
+    "PASS": "green",
+    "FAIL": "red",
+    "NOT_APPLICABLE": "dim",
+}
+
+
+def _print_compliance(rows: list[dict], framework: str) -> None:
+    display_name = _FRAMEWORK_DISPLAY_NAMES.get(framework, framework)
+    console.print()
+    console.rule(f"[bold cyan]Compliance: {display_name}[/bold cyan]")
+    console.print(
+        "[dim]Best-effort mapping — not a substitute for a full assessment. "
+        "Verify against the official standard before relying on this for an audit.[/dim]\n"
+    )
+
+    t = Table(box=box.SIMPLE_HEAD, show_lines=True)
+    t.add_column("Control", no_wrap=True)
+    t.add_column("Chapter", overflow="fold")
+    t.add_column("Status", no_wrap=True)
+    t.add_column("Description", overflow="fold", ratio=2)
+    t.add_column("Evidence", justify="right", no_wrap=True)
+
+    counts = {"PASS": 0, "FAIL": 0, "NOT_APPLICABLE": 0}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+        color = _COMPLIANCE_STATUS_COLOR.get(row["status"], "white")
+        t.add_row(
+            row["id"], row["chapter"], f"[{color}]{row['status']}[/]",
+            row["description"], str(row["evidence_count"]),
+        )
+    console.print(t)
+    console.print(
+        f"\n[green]{counts['PASS']} PASS[/green]  "
+        f"[red]{counts['FAIL']} FAIL[/red]  "
+        f"[dim]{counts['NOT_APPLICABLE']} N/A[/dim]\n"
+    )
 
 
 def _print_diff(result) -> None:

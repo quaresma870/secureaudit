@@ -1,0 +1,13 @@
+"""
+Compliance framework registry — extensible mapping of framework name to its
+evaluate(result) -> list[dict] function. Add new frameworks by writing a
+module with the same evaluate() signature and registering it here.
+"""
+
+from __future__ import annotations
+
+from secureaudit.compliance import owasp_asvs
+
+FRAMEWORKS = {
+    "owasp-asvs": owasp_asvs.evaluate,
+}
