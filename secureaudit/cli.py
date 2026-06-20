@@ -219,6 +219,12 @@ def scan(
         run_id = save(result, db, project=cfg.project)
         console.print(f"[green]✔[/green] Saved to [bold]{db}[/bold] (run #{run_id})")
 
+        if cfg.project:
+            from secureaudit.core.webhooks import check_and_fire_project_webhooks
+            fired = check_and_fire_project_webhooks(db, cfg.project, run_id)
+            if fired:
+                console.print(f"[yellow]🔔 {fired} webhook(s) notified — new regression detected[/yellow]")
+
     if result.score < threshold:
         console.print(f"\n[bold red]✘ Score {result.score} is below threshold {threshold}. Failing.[/bold red]\n")
         sys.exit(1)
@@ -395,16 +401,44 @@ def _print_result(result, threshold: int) -> None:
               help="SQLite database with audit history.")
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--port", default=8080, show_default=True)
-def serve(db, host, port):
+@click.option("--token", default=None,
+              help="API token required for write operations (POST/DELETE). "
+                   "Auto-generated and printed if the dashboard isn't bound to "
+                   "localhost and no token was provided. Also reads SECUREAUDIT_API_TOKEN.")
+def serve(db, host, port, token):
     """Start the web dashboard for audit history."""
     try:
         import uvicorn
     except ImportError:
         console.print("[red]uvicorn is required: pip install uvicorn[/red]")
         sys.exit(1)
+
+    import os
+    import secrets as _secrets
+
     from secureaudit.dashboard.app import create_app
+
+    is_localhost = host in ("127.0.0.1", "localhost", "::1")
+    require_token = not is_localhost
+
+    if token is None:
+        token = os.environ.get("SECUREAUDIT_API_TOKEN")
+
+    if require_token and not token:
+        token = _secrets.token_urlsafe(24)
+        console.print(
+            f"[yellow]⚠  Dashboard bound to {host} (not localhost) — generated an API token:[/yellow]"
+        )
+        console.print(f"  [bold]{token}[/bold]")
+        console.print(
+            "  Required for POST/DELETE requests: Authorization: Bearer <token>\n"
+            "  (or set SECUREAUDIT_API_TOKEN to provide your own ahead of time)\n"
+        )
+
     console.print(f"[bold cyan]🔐 SecureAudit Dashboard[/bold cyan] → http://{host}:{port}")
-    app = create_app(db)
+    console.print(f"[dim]API docs:[/dim] http://{host}:{port}/docs\n")
+
+    app = create_app(db, api_token=token, require_token=require_token)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

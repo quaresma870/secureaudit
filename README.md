@@ -123,6 +123,11 @@ secureaudit scan . --no-cache
 secureaudit history --db audits.db --project my-app
 secureaudit projects --db audits.db
 
+# Start the dashboard with REST API + OpenAPI docs at /docs
+secureaudit serve --db audits.db
+# Bound to a real network interface — requires a token for writes:
+secureaudit serve --db audits.db --host 0.0.0.0 --token your-secret
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -232,6 +237,21 @@ PYTHONPATH=. pytest tests/ -v
 ---
 
 ## Changelog
+
+### v1.4.0
+- feat: REST API for the dashboard — closes #25
+  - `POST /api/scan` — triggers a scan asynchronously, returns a `scan_id` immediately;
+    poll `GET /api/scan/{scan_id}` for `running` → `completed`/`failed` + the resulting run ID
+  - `POST /api/projects/{name}/webhooks` — register a webhook that fires when a project's new
+    run introduces new CRITICAL/HIGH findings vs. its previous run (reuses the `diff` engine);
+    `GET`/`DELETE` to list/remove
+  - `GET /api/runs/{id}/findings?severity=CRITICAL` — filterable findings endpoint
+  - API token auth (`Authorization: Bearer <token>`) — required for all POST/DELETE endpoints
+    once the dashboard is bound to anything other than localhost; `secureaudit serve --token`
+    or `SECUREAUDIT_API_TOKEN` env var, auto-generated and printed if needed and not provided
+  - OpenAPI docs enabled at `/docs` (and `/redoc`)
+  - `scan`/`schedule` CLI commands now fire registered project webhooks automatically after
+    saving to history, same regression-diff logic as the dashboard's background scan
 
 ### v1.3.0
 - feat: project grouping — `project: name` in `secureaudit.yml` ties multiple repos/targets

@@ -100,6 +100,12 @@ def run_schedule(
             run_id = save(result, db, project=cfg.project)
             console.print(f"[green]✔[/green] Saved to {db} (run #{run_id})")
 
+            if cfg.project:
+                from secureaudit.core.webhooks import check_and_fire_project_webhooks
+                fired = check_and_fire_project_webhooks(db, cfg.project, run_id)
+                if fired:
+                    console.print(f"[yellow]🔔 {fired} webhook(s) notified — new regression detected[/yellow]")
+
         # HTML report
         if output_dir:
             from datetime import datetime
