@@ -1,0 +1,149 @@
+# Changelog
+
+All notable changes to this project are documented here. See the
+[README](README.md) for current features and usage.
+
+### v1.5.0
+- feat: OWASP ASVS v4.0.3 compliance mapping — `--compliance-report owasp-asvs` — closes #22
+  - 15 ASVS controls mapped across 9 plugins (secrets, cve, trivy, http, cors, sast, policy,
+    malware, git_history) — control-by-control PASS / FAIL / NOT_APPLICABLE breakdown
+  - `--compliance-output path.json` for a machine-readable export
+  - **Best-effort mapping, not a certification tool** — requirement descriptions are paraphrased
+    summaries; verify against the official standard before relying on this for a real audit:
+    https://github.com/OWASP/ASVS/tree/master/4.0
+  - A control is `NOT_APPLICABLE` when none of the plugins that could provide evidence for it
+    were run in this scan; `PASS` means the relevant plugin(s) ran clean, not that every aspect
+    of the requirement was independently verified
+  - Suppressed/baselined findings never count as compliance failures, consistent with how they're
+    excluded from the security score
+
+### v1.4.0
+- feat: REST API for the dashboard — closes #25
+  - `POST /api/scan` — triggers a scan asynchronously, returns a `scan_id` immediately;
+    poll `GET /api/scan/{scan_id}` for `running` → `completed`/`failed` + the resulting run ID
+  - `POST /api/projects/{name}/webhooks` — register a webhook that fires when a project's new
+    run introduces new CRITICAL/HIGH findings vs. its previous run (reuses the `diff` engine);
+    `GET`/`DELETE` to list/remove
+  - `GET /api/runs/{id}/findings?severity=CRITICAL` — filterable findings endpoint
+  - API token auth (`Authorization: Bearer <token>`) — required for all POST/DELETE endpoints
+    once the dashboard is bound to anything other than localhost; `secureaudit serve --token`
+    or `SECUREAUDIT_API_TOKEN` env var, auto-generated and printed if needed and not provided
+  - OpenAPI docs enabled at `/docs` (and `/redoc`)
+  - `scan`/`schedule` CLI commands now fire registered project webhooks automatically after
+    saving to history, same regression-diff logic as the dashboard's background scan
+
+### v1.3.0
+- feat: project grouping — `project: name` in `secureaudit.yml` ties multiple repos/targets
+  to one named project for portfolio-style aggregation — closes #20
+  - `secureaudit history --db audits.db --project name` — filter CLI history by project
+  - `secureaudit projects --db audits.db` — list all projects with latest score/grade
+  - Dashboard: `GET /projects` (portfolio list) + `GET /projects/{name}` (score trend chart)
+  - `GET /api/projects` and `GET /api/runs?project=name` JSON endpoints
+  - Fully backward compatible: existing `audits.db` files migrate automatically (the `project`
+    column is added via `ALTER TABLE` on first use); omitting `project:` keeps runs ungrouped
+    exactly as before
+
+### v1.2.0
+- feat: incremental scan caching for `secrets`, `sast`, and `policy` (Dockerfile/CI checks) — closes #23
+  - `.secureaudit-cache/` keyed by file content hash + plugin identity + plugin config hash
+  - Unchanged files reuse cached results; a fully cache-hit SAST run never invokes `semgrep` at all
+  - Changing a plugin's config in `secureaudit.yml` automatically invalidates affected entries
+  - `--no-cache` forces a full rescan; `secureaudit cache status .` / `secureaudit cache clear .`
+- fix: hard-excluded `.secureaudit-cache/` from all file-collecting plugins, independent of any
+  user-configured `exclude_paths` — without this, the cache file (which stores matched secret
+  evidence text) would be re-scanned as a *new* secret on every subsequent run, growing forever
+
+### v1.1.0
+- feat: native Slack notifications (`--alert-slack <webhook>`) — closes #21
+  - Block Kit formatting: score, grade, severity counts, top 3 findings, colour-coded sidebar
+  - Optional "View full report" button via `--dashboard-url`
+- feat: native Microsoft Teams notifications (`--alert-teams <webhook>`) — closes #21
+  - Equivalent Adaptive Card rendering
+- feat: weekly digest mode — `secureaudit digest . --db audits.db --slack-webhook URL` — closes #21
+  - Summarises N days of history: latest score/grade, 7-day trend, run count
+- Colour coding (both platforms): 🟢 green ≥90, 🟡 yellow 60-89, 🔴 red <60
+- `secureaudit schedule` now accepts `--alert-slack`/`--alert-teams` alongside the
+  existing generic `--alert-webhook` — all fire only on score regression
+
+### v1.0.9
+- feat: published to PyPI — `pip install secureaudit` — closes #18
+  - `.github/workflows/publish.yml` — auto-publish on `v*.*.*` tags via PyPI trusted publishing (OIDC, no stored token)
+  - Optional extras: `secureaudit[sast]`, `secureaudit[dashboard]`, `secureaudit[all]`
+- feat: Homebrew tap — `brew tap quaresma870/secureaudit && brew install secureaudit` — closes #18
+  - New repo: [homebrew-secureaudit](https://github.com/quaresma870/homebrew-secureaudit)
+  - Formula generated with real sha256 hashes for every Python dependency (fetched from PyPI's JSON API)
+  - `bin/update-formula.sh` to bump the formula after each release
+- fix: `pyproject.toml` had an invalid PEP 517 `build-backend`
+  (`setuptools.backends.legacy:build` — not a real backend) that would have
+  broken every `pip install`/`python -m build` attempt; corrected to `setuptools.build_meta`
+  and verified end-to-end (built wheel → installed in clean venv → ran a real scan)
+- fix: `secureaudit --version` was hardcoded to `"1.0.0"` regardless of the actual
+  installed version; now resolves dynamically via `importlib.metadata`
+- ci: added a `build` job that builds the package, runs `twine check`, and smoke-tests
+  the installed CLI in a clean venv on every push — would have caught both bugs above
+
+### v1.0.8
+- feat: `secureaudit init` — interactive onboarding wizard — closes #19
+  - Detects language (Python/Node/Go/Rust/PHP/Ruby), Dockerfile, git repo
+  - Enables only relevant plugins: base (secrets/filesystem/policy) + cve if deps found,
+    git_history if git repo, trivy if Dockerfile present
+  - Optionally prompts for URLs (enables http/cors) and hosts (enables network)
+  - `--yes` for non-interactive/CI use; `--force` to overwrite existing config
+  - Offers to create a baseline immediately so day one isn't noisy
+
+### v1.0.7
+- feat: pre-commit hook — `secureaudit pre-commit install` — closes #24
+  - Scans only staged files (fast — typically <1s, no full-repo walk)
+  - Blocks commit if a CRITICAL/HIGH secret is detected, with clear remediation guidance
+  - `secureaudit pre-commit uninstall` removes it cleanly; refuses to touch hooks it didn't install
+  - `.pre-commit-hooks.yaml` published for compatibility with the [pre-commit framework](https://pre-commit.com)
+  - `git commit --no-verify` documented as the (discouraged) override
+
+### v1.0.6
+- feat: `secureaudit diff <run1> <run2> --db audits.db` — closes #17
+  - Matches findings across runs by stable key (plugin + rule + file), immune to line drift
+  - Shows **new**, **resolved**, and unchanged-count
+  - `latest`/`previous` keywords as shortcuts for run IDs
+  - Non-zero exit code when new CRITICAL/HIGH findings are introduced (regression gate)
+  - `--json` for CI consumption (e.g. PR comment bots)
+  - `--include-suppressed` to also diff baselined/inline-suppressed findings
+
+### v1.0.5
+- feat: baseline command (`secureaudit baseline .`) — accept existing findings as known risk — closes #16
+  (`.secureaudit-baseline.json`, fingerprint independent of line-number drift, merge or `--force` replace)
+- feat: inline suppression via `# secureaudit-ignore` comments — closes #16
+  (optional rule slug, `reason="..."`, and `until=YYYY-MM-DD` for forced re-review)
+- feat: suppressed findings shown separately in terminal/HTML reports (not hidden, excluded from score)
+- fix: `scan` command was missing `--sarif`/`--db` option decorators despite using them — caused
+  a `TypeError` at invocation; added CLI integration tests (`CliRunner`) to catch this class of bug going forward
+- fix: `reports/history.py` referenced non-existent `AuditResult.total`/`.sources`/`.error_rate` —
+  rewrote SQLite schema to match actual model fields, added `suppressed_count` tracking
+- fix: dashboard updated to match corrected history schema column names
+
+### v1.0.4
+- feat: SAST plugin via Semgrep (`sast`) — closes #13
+  (3000+ OWASP Top 10 rules, runs entirely locally, graceful degradation if not installed)
+- feat: malware scanning via ClamAV (`malware`) — closes #14
+  (scans node_modules/.venv/uploads for known malware signatures, stale definitions warning)
+- feat: container + IaC scanning via Trivy (`trivy`) — closes #15
+  (broader ecosystem than OSV.dev: Cargo/Composer/NuGet; Dockerfile/K8s/Terraform misconfig)
+- chore: `cors` and `git_history` added to default plugin list
+
+### v1.0.3
+- feat: CORS misconfiguration plugin (`cors`) — closes #7
+  (origin reflection, wildcard + credentials, null origin — maps to OWASP)
+- feat: git history secret scanner plugin (`git_history`) — closes #8
+  (scans commit diffs for secrets removed from working tree; reports commit SHA + author)
+- feat: `secureaudit schedule` — scheduled audit mode — closes #9
+  (cron expression, regression detection — only alerts on score drop)
+
+### v1.0.2
+- feat: SARIF 2.1.0 output (`--sarif results.sarif`) for GitHub Security tab — closes #2
+- feat: SQLite audit history (`--db audits.db`) + `history` subcommand — closes #4
+- feat: web dashboard (`secureaudit serve --db audits.db`) at `http://localhost:8080` — closes #5
+  (`GET /` history, `GET /run/{id}` details, `GET /api/runs` JSON API)
+
+### v1.0.1
+- fix: `datetime.utcnow()` → `datetime.now(timezone.utc)` — closes #3
+- fix: CVE plugin reports network failures as `INFO` finding — closes #6
+- feat: plugins run in parallel via `ThreadPoolExecutor` (~4× faster) — closes #1
