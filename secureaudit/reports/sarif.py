@@ -87,7 +87,13 @@ def write_sarif(result: AuditResult, path: str | Path) -> None:
         sarif_results.append(sarif_result)
 
     sarif = {
-        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Documents/CommitteeSpecifications/2.1.0/sarif-schema-2.1.0.json",
+        # The URL the SARIF spec's own examples use (.../master/Documents/
+        # CommitteeSpecifications/2.1.0/...) returns a 404 — a known,
+        # widely-reported issue with the spec's own published examples, not
+        # something specific to this tool. Confirmed this exact path
+        # (main branch, sarif-2.1/schema/) actually resolves before using
+        # it, rather than copying the commonly-cited but broken one.
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
         "version": "2.1.0",
         "runs": [
             {
