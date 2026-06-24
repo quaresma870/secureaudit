@@ -11,7 +11,7 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 
 ## Features
 
-- ✅ **6 plugins** — secrets, CVE, filesystem, HTTP headers, network, policy
+- ✅ **11 plugins** — secrets, CVE, filesystem, HTTP headers, network, policy, CORS, git history, SAST, malware, Trivy
 - ✅ **Security score** 0–100 with letter grade (A–F)
 - ✅ **Severity levels** — Critical / High / Medium / Low / Info
 - ✅ **HTML report** — self-contained with Chart.js charts
@@ -19,7 +19,7 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 - ✅ **SARIF 2.1.0 output** — validated against the official schema, wired into the GitHub Action for automatic Security tab integration
 - ✅ **GitHub Action** — block PRs if score drops below threshold
 - ✅ **Config file** — `secureaudit.yml` for full customisation
-- ✅ **272 tests** — models, plugins, engine, dashboard, compliance, SARIF
+- ✅ **285 tests** — models, plugins, engine, dashboard, compliance, SARIF
 
 ---
 
@@ -133,6 +133,11 @@ secureaudit serve --db audits.db --host 0.0.0.0 --token your-secret
 secureaudit scan . --compliance-report owasp-asvs
 secureaudit scan . --compliance-report owasp-asvs --compliance-output compliance.json
 
+# CIS Docker Benchmark (Section 4 — Dockerfile/build-file content, the
+# part actually knowable from a repo checkout; the benchmark's other
+# sections need a live Docker host to evaluate)
+secureaudit scan . --compliance-report cis-docker
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -226,7 +231,8 @@ secureaudit/
 │   │   ├── network.py          # Port scanner
 │   │   └── policy.py           # Dockerfile, .gitignore, CI checks
 │   ├── compliance/
-│   │   └── owasp_asvs.py       # OWASP ASVS v4.0.3 control-by-control mapping
+│   │   ├── owasp_asvs.py       # OWASP ASVS v4.0.3 control-by-control mapping
+│   │   └── cis_docker.py       # CIS Docker Benchmark Section 4 mapping
 │   ├── dashboard/
 │   │   └── app.py              # FastAPI dashboard — history, projects, webhooks
 │   └── reports/

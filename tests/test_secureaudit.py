@@ -3319,10 +3319,150 @@ class TestComplianceFrameworkRegistry:
         from secureaudit.compliance import FRAMEWORKS
         assert "owasp-asvs" in FRAMEWORKS
 
+    def test_cis_docker_registered(self):
+        from secureaudit.compliance import FRAMEWORKS
+        assert "cis-docker" in FRAMEWORKS
+
     def test_registry_function_matches_module_function(self):
         from secureaudit.compliance import FRAMEWORKS
         from secureaudit.compliance.owasp_asvs import evaluate
         assert FRAMEWORKS["owasp-asvs"] is evaluate
+
+    def test_cis_docker_registry_function_matches_module_function(self):
+        from secureaudit.compliance import FRAMEWORKS
+        from secureaudit.compliance.cis_docker import evaluate
+        assert FRAMEWORKS["cis-docker"] is evaluate
+
+
+class TestCISDockerEvaluate:
+    """CIS Docker Benchmark control IDs (4.1, 4.2, 4.9, 4.10) and their
+    descriptions are checked against the actual published benchmark
+    (cross-referenced against multiple independent sources, not guessed)
+    — see cis_docker.py's module docstring for sourcing."""
+
+    def _run(self, target, plugins):
+        cfg = load_config(None)
+        engine = AuditEngine(cfg)
+        return engine.run(target, plugins=plugins)
+
+    def test_returns_one_row_per_control(self):
+        from secureaudit.compliance.cis_docker import CONTROLS, evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            assert len(rows) == len(CONTROLS)
+
+    def test_not_applicable_when_plugin_not_run(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["network"])  # neither policy nor secrets runs
+            rows = evaluate(result)
+            for row in rows:
+                assert row["status"] == "NOT_APPLICABLE"
+
+    def test_pass_when_no_dockerfile_at_all(self):
+        """No Dockerfile in the repo at all is treated as PASS (vacuously
+        — nothing to violate), not NOT_APPLICABLE, since the controls'
+        plugins (policy/secrets) DID run. An earlier version tried to
+        special-case this as NOT_APPLICABLE by checking for a finding
+        mentioning "dockerfile", which broke PASS for a real, compliant
+        Dockerfile (no such finding exists for a clean one either) —
+        caught by actually running it against one, not reasoned through
+        up front. See the module's evaluate() docstring."""
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            for row in rows:
+                assert row["status"] == "PASS"
+
+    def test_pass_when_dockerfile_is_clean(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text(
+                "FROM python:3.11.9-slim\nCOPY app.py /app/app.py\nUSER nonroot\nCMD [\"python\", \"/app/app.py\"]\n"
+            )
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            for row in rows:
+                assert row["status"] == "PASS", f"{row['id']} unexpectedly {row['status']}"
+
+    def test_fail_4_1_when_dockerfile_runs_as_root(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:3.11.9-slim\nCOPY app.py /app/app.py\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.1")
+            assert control["status"] == "FAIL"
+            assert control["evidence_count"] == 1
+
+    def test_fail_4_2_when_base_image_unpinned(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:latest\nUSER nonroot\nCOPY app.py /app/app.py\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.2")
+            assert control["status"] == "FAIL"
+
+    def test_fail_4_9_when_add_used_instead_of_copy(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text(
+                "FROM python:3.11.9-slim\nUSER nonroot\nADD app.tar.gz /app\n"
+            )
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.9")
+            assert control["status"] == "FAIL"
+
+    def test_fail_4_10_when_secret_in_dockerfile(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text(
+                'FROM python:3.11.9-slim\nUSER nonroot\n'
+                'ENV AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
+            )
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.10")
+            assert control["status"] == "FAIL"
+            assert control["evidence_count"] >= 1
+
+    def test_secret_in_a_different_file_does_not_trigger_4_10(self):
+        """4.10 is specifically about secrets baked into the Dockerfile —
+        a secret detected in some other source file is a real (different)
+        finding, but must not count as evidence for THIS control."""
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:3.11.9-slim\nUSER nonroot\nCOPY . /app\n")
+            Path(d, "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.10")
+            assert control["status"] == "PASS"
+
+    def test_suppressed_findings_do_not_count_as_fail(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        from secureaudit.core.baseline import apply_suppressions, save_baseline
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "Dockerfile").write_text("FROM python:3.11.9-slim\nCOPY app.py /app/app.py\n")
+
+            result1 = self._run(target, ["policy"])
+            bpath = target / ".secureaudit-baseline.json"
+            save_baseline(bpath, result1.all_findings, str(target))
+
+            result2 = self._run(target, ["policy"])
+            apply_suppressions(result2, target=target, baseline_path=bpath)
+
+            rows = evaluate(result2)
+            control = next(r for r in rows if r["id"] == "4.1")
+            assert control["status"] == "PASS"
 
 
 class TestComplianceCLI:
@@ -3361,6 +3501,26 @@ class TestComplianceCLI:
             data = _json.loads(out_path.read_text())
             assert len(data) >= 15
             assert all("status" in row for row in data)
+
+    def test_cis_docker_compliance_report_via_cli(self):
+        """cis-docker is reachable through the real CLI, not just the
+        FRAMEWORKS dict directly — confirms --compliance-report's
+        click.Choice() actually includes it, which is the part an earlier
+        version of this got wrong (the Choice list was hardcoded to
+        ["owasp-asvs"] and never updated when a new framework was
+        registered, so it would have been silently rejected by Click
+        before this test existed to catch it)."""
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:latest\nCOPY app.py /app/app.py\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "policy", "--fail-below", "0",
+                "--compliance-report", "cis-docker",
+            ])
+            assert result.exit_code == 0, result.output
+            assert "CIS Docker Benchmark" in result.output
+            assert "4.1" in result.output
 
     def test_compliance_report_invalid_framework_rejected(self):
         from secureaudit.cli import cli

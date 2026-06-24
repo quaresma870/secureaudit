@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from secureaudit.compliance import FRAMEWORKS
 from secureaudit.core.config import load_config
 from secureaudit.core.engine import AuditEngine
 from secureaudit.core.models import Severity
@@ -139,7 +140,7 @@ def init(target, yes, force, baseline):
 @click.option("--no-cache", is_flag=True,
               help="Disable incremental file-result caching — forces a full rescan of every file.")
 @click.option("--compliance-report", default=None,
-              type=click.Choice(["owasp-asvs"]),
+              type=click.Choice(list(FRAMEWORKS.keys())),
               help="Show a control-by-control compliance breakdown for the given framework.")
 @click.option("--compliance-output", default=None,
               help="Write the compliance breakdown as JSON to this path.")
@@ -194,7 +195,6 @@ def scan(
         _print_result(result, threshold)
 
     if compliance_report:
-        from secureaudit.compliance import FRAMEWORKS
         rows = FRAMEWORKS[compliance_report](result)
         if not no_terminal:
             _print_compliance(rows, compliance_report)
@@ -717,6 +717,7 @@ def projects(db):
 
 _FRAMEWORK_DISPLAY_NAMES = {
     "owasp-asvs": "OWASP ASVS v4.0.3",
+    "cis-docker": "CIS Docker Benchmark (Section 4)",
 }
 
 _COMPLIANCE_STATUS_COLOR = {
