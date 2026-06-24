@@ -3,6 +3,46 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.6.0
+- fix: **`action.yml` was broken YAML from the start** — an unquoted colon inside a plain-scalar
+  description (`(default: all)`) made the entire file invalid YAML, confirmed against the version
+  already on `dev` before touching anything. This means `uses: quaresma870/secureaudit@main`, as
+  documented in this project's own README, could never have actually worked for anyone — GitHub
+  can't parse the action's metadata file to discover its inputs/outputs/steps at all. Fixed by
+  quoting the string — closes #27.
+- feat: **`sarif-output` input added to the GitHub Action**, wired to the CLI's existing `--sarif`
+  flag, plus a `github/codeql-action/upload-sarif@v4` step (the current recommended major version,
+  not v3 which starts deprecating in Dec 2026) that runs on `always()` — the audit "failing" its
+  score threshold is exactly the case where you most want findings visible in the Security tab,
+  not less.
+- fix: the `$schema` URL written into every generated SARIF file 404s — a known, widely-reported
+  issue with the SARIF spec's own published examples, not unique to this codebase. Found the actual
+  working path and confirmed it resolves before using it — closes #26.
+- test: **5 new SARIF tests** — real schema validation against the official 2.1.0 schema (bundled
+  in `tests/fixtures/`, not fetched live), a regression test pinning the corrected schema URL,
+  correct omission of `locations` for findings with no file/line, severity-to-level mapping
+  verified against actual written output, and rule deduplication.
+- feat: **new `cis-docker` compliance framework** — `--compliance-report cis-docker` — mapping to
+  CIS Docker Benchmark Section 4 (Container Images and Build File Configuration) specifically,
+  confirmed against the real published control numbering (4.1, 4.2, 4.9, 4.10) before mapping
+  anything. Deliberately scoped to Section 4 only: the benchmark's other sections need a live
+  Docker host to evaluate, which is unobservable from static source — closes #28.
+- fix: `--compliance-report`'s `click.Choice()` was hardcoded to `["owasp-asvs"]` rather than
+  derived from the `FRAMEWORKS` registry — registering a new framework there alone would not have
+  made it reachable through the CLI at all. Now derives the choice list dynamically.
+- test: **13 new CIS Docker tests**, including one that caught a real bug in the first version of
+  `evaluate()`: an attempt to mark "no Dockerfile found" as `NOT_APPLICABLE` couldn't distinguish
+  that from "a Dockerfile exists and is fully compliant" — a clean Dockerfile was incorrectly
+  showing `NOT_APPLICABLE` instead of `PASS` until actually running it against one caught this and
+  it was simplified to match `owasp_asvs.py`'s proven convention.
+- fix: swapped `httpx` for `httpx2` in requirements.txt — the exact same Starlette/FastAPI
+  `TestClient` deprecation that became a hard `RuntimeError` in a sibling portfolio repo, applied
+  here proactively before it does the same.
+- docs: fixed several README staleness issues found along the way — the plugin count summary said
+  "6 plugins" when 11 actually exist, the test count was stale at several points as tests were
+  added through this release (25 → 285), and the project structure tree was missing `sarif.py`,
+  `compliance/`, `dashboard/`, and `tests/fixtures/` entirely.
+
 ### v1.5.0
 - feat: OWASP ASVS v4.0.3 compliance mapping — `--compliance-report owasp-asvs` — closes #22
   - 15 ASVS controls mapped across 9 plugins (secrets, cve, trivy, http, cors, sast, policy,
