@@ -11,14 +11,15 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 
 ## Features
 
-- ✅ **6 plugins** — secrets, CVE, filesystem, HTTP headers, network, policy
+- ✅ **11 plugins** — secrets, CVE, filesystem, HTTP headers, network, policy, CORS, git history, SAST, malware, Trivy
 - ✅ **Security score** 0–100 with letter grade (A–F)
 - ✅ **Severity levels** — Critical / High / Medium / Low / Info
 - ✅ **HTML report** — self-contained with Chart.js charts
 - ✅ **JSON output** — machine-readable for integrations
+- ✅ **SARIF 2.1.0 output** — validated against the official schema, wired into the GitHub Action for automatic Security tab integration
 - ✅ **GitHub Action** — block PRs if score drops below threshold
 - ✅ **Config file** — `secureaudit.yml` for full customisation
-- ✅ **25 tests** — models, plugins, engine
+- ✅ **285 tests** — models, plugins, engine, dashboard, compliance, SARIF
 
 ---
 
@@ -132,6 +133,11 @@ secureaudit serve --db audits.db --host 0.0.0.0 --token your-secret
 secureaudit scan . --compliance-report owasp-asvs
 secureaudit scan . --compliance-report owasp-asvs --compliance-output compliance.json
 
+# CIS Docker Benchmark (Section 4 — Dockerfile/build-file content, the
+# part actually knowable from a repo checkout; the benchmark's other
+# sections need a live Docker host to evaluate)
+secureaudit scan . --compliance-report cis-docker
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -141,13 +147,19 @@ secureaudit list-plugins
 Add to your workflow to audit every PR:
 
 ```yaml
-- name: Security Audit
-  uses: quaresma870/secureaudit@main
-  with:
-    plugins: secrets,cve,filesystem,policy
-    fail-below: "70"
-    output-html: secureaudit-report.html
-    output-json: secureaudit-report.json
+permissions:
+  contents: read
+  security-events: write   # only needed if you use sarif-output below
+
+steps:
+  - name: Security Audit
+    uses: quaresma870/secureaudit@main
+    with:
+      plugins: secrets,cve,filesystem,policy
+      fail-below: "70"
+      output-html: secureaudit-report.html
+      output-json: secureaudit-report.json
+      sarif-output: secureaudit.sarif   # findings show up in the Security tab automatically
 ```
 
 ---
@@ -218,11 +230,19 @@ secureaudit/
 │   │   ├── http_headers.py     # HTTP security headers + SSL
 │   │   ├── network.py          # Port scanner
 │   │   └── policy.py           # Dockerfile, .gitignore, CI checks
+│   ├── compliance/
+│   │   ├── owasp_asvs.py       # OWASP ASVS v4.0.3 control-by-control mapping
+│   │   └── cis_docker.py       # CIS Docker Benchmark Section 4 mapping
+│   ├── dashboard/
+│   │   └── app.py              # FastAPI dashboard — history, projects, webhooks
 │   └── reports/
 │       ├── html.py             # Self-contained HTML with Chart.js
-│       └── json_report.py      # JSON serialiser
+│       ├── json_report.py      # JSON serialiser
+│       └── sarif.py            # SARIF 2.1.0 — GitHub Security tab integration
 ├── tests/
-│   └── test_secureaudit.py     # 25 tests
+│   ├── test_secureaudit.py     # 272 tests
+│   └── fixtures/
+│       └── sarif-schema-2.1.0.json   # official schema, for real validation in tests
 ├── action.yml                  # GitHub Action definition
 ├── secureaudit.yml.example     # Config template
 ├── .github/workflows/ci.yml    # Lint + test pipeline

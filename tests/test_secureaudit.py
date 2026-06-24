@@ -4,6 +4,7 @@ Tests for SecureAudit — plugins, engine and models.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -3318,10 +3319,150 @@ class TestComplianceFrameworkRegistry:
         from secureaudit.compliance import FRAMEWORKS
         assert "owasp-asvs" in FRAMEWORKS
 
+    def test_cis_docker_registered(self):
+        from secureaudit.compliance import FRAMEWORKS
+        assert "cis-docker" in FRAMEWORKS
+
     def test_registry_function_matches_module_function(self):
         from secureaudit.compliance import FRAMEWORKS
         from secureaudit.compliance.owasp_asvs import evaluate
         assert FRAMEWORKS["owasp-asvs"] is evaluate
+
+    def test_cis_docker_registry_function_matches_module_function(self):
+        from secureaudit.compliance import FRAMEWORKS
+        from secureaudit.compliance.cis_docker import evaluate
+        assert FRAMEWORKS["cis-docker"] is evaluate
+
+
+class TestCISDockerEvaluate:
+    """CIS Docker Benchmark control IDs (4.1, 4.2, 4.9, 4.10) and their
+    descriptions are checked against the actual published benchmark
+    (cross-referenced against multiple independent sources, not guessed)
+    — see cis_docker.py's module docstring for sourcing."""
+
+    def _run(self, target, plugins):
+        cfg = load_config(None)
+        engine = AuditEngine(cfg)
+        return engine.run(target, plugins=plugins)
+
+    def test_returns_one_row_per_control(self):
+        from secureaudit.compliance.cis_docker import CONTROLS, evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            assert len(rows) == len(CONTROLS)
+
+    def test_not_applicable_when_plugin_not_run(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["network"])  # neither policy nor secrets runs
+            rows = evaluate(result)
+            for row in rows:
+                assert row["status"] == "NOT_APPLICABLE"
+
+    def test_pass_when_no_dockerfile_at_all(self):
+        """No Dockerfile in the repo at all is treated as PASS (vacuously
+        — nothing to violate), not NOT_APPLICABLE, since the controls'
+        plugins (policy/secrets) DID run. An earlier version tried to
+        special-case this as NOT_APPLICABLE by checking for a finding
+        mentioning "dockerfile", which broke PASS for a real, compliant
+        Dockerfile (no such finding exists for a clean one either) —
+        caught by actually running it against one, not reasoned through
+        up front. See the module's evaluate() docstring."""
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            for row in rows:
+                assert row["status"] == "PASS"
+
+    def test_pass_when_dockerfile_is_clean(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text(
+                "FROM python:3.11.9-slim\nCOPY app.py /app/app.py\nUSER nonroot\nCMD [\"python\", \"/app/app.py\"]\n"
+            )
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            for row in rows:
+                assert row["status"] == "PASS", f"{row['id']} unexpectedly {row['status']}"
+
+    def test_fail_4_1_when_dockerfile_runs_as_root(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:3.11.9-slim\nCOPY app.py /app/app.py\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.1")
+            assert control["status"] == "FAIL"
+            assert control["evidence_count"] == 1
+
+    def test_fail_4_2_when_base_image_unpinned(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:latest\nUSER nonroot\nCOPY app.py /app/app.py\n")
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.2")
+            assert control["status"] == "FAIL"
+
+    def test_fail_4_9_when_add_used_instead_of_copy(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text(
+                "FROM python:3.11.9-slim\nUSER nonroot\nADD app.tar.gz /app\n"
+            )
+            result = self._run(d, ["policy"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.9")
+            assert control["status"] == "FAIL"
+
+    def test_fail_4_10_when_secret_in_dockerfile(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text(
+                'FROM python:3.11.9-slim\nUSER nonroot\n'
+                'ENV AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
+            )
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.10")
+            assert control["status"] == "FAIL"
+            assert control["evidence_count"] >= 1
+
+    def test_secret_in_a_different_file_does_not_trigger_4_10(self):
+        """4.10 is specifically about secrets baked into the Dockerfile —
+        a secret detected in some other source file is a real (different)
+        finding, but must not count as evidence for THIS control."""
+        from secureaudit.compliance.cis_docker import evaluate
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:3.11.9-slim\nUSER nonroot\nCOPY . /app\n")
+            Path(d, "config.py").write_text('AWS_KEY = "AKIAI9ABCDEF1234WXYZ"\n')
+            result = self._run(d, ["policy", "secrets"])
+            rows = evaluate(result)
+            control = next(r for r in rows if r["id"] == "4.10")
+            assert control["status"] == "PASS"
+
+    def test_suppressed_findings_do_not_count_as_fail(self):
+        from secureaudit.compliance.cis_docker import evaluate
+        from secureaudit.core.baseline import apply_suppressions, save_baseline
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d)
+            (target / "Dockerfile").write_text("FROM python:3.11.9-slim\nCOPY app.py /app/app.py\n")
+
+            result1 = self._run(target, ["policy"])
+            bpath = target / ".secureaudit-baseline.json"
+            save_baseline(bpath, result1.all_findings, str(target))
+
+            result2 = self._run(target, ["policy"])
+            apply_suppressions(result2, target=target, baseline_path=bpath)
+
+            rows = evaluate(result2)
+            control = next(r for r in rows if r["id"] == "4.1")
+            assert control["status"] == "PASS"
 
 
 class TestComplianceCLI:
@@ -3361,6 +3502,26 @@ class TestComplianceCLI:
             assert len(data) >= 15
             assert all("status" in row for row in data)
 
+    def test_cis_docker_compliance_report_via_cli(self):
+        """cis-docker is reachable through the real CLI, not just the
+        FRAMEWORKS dict directly — confirms --compliance-report's
+        click.Choice() actually includes it, which is the part an earlier
+        version of this got wrong (the Choice list was hardcoded to
+        ["owasp-asvs"] and never updated when a new framework was
+        registered, so it would have been silently rejected by Click
+        before this test existed to catch it)."""
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "Dockerfile").write_text("FROM python:latest\nCOPY app.py /app/app.py\n")
+            result = runner.invoke(cli, [
+                "scan", d, "--plugins", "policy", "--fail-below", "0",
+                "--compliance-report", "cis-docker",
+            ])
+            assert result.exit_code == 0, result.output
+            assert "CIS Docker Benchmark" in result.output
+            assert "4.1" in result.output
+
     def test_compliance_report_invalid_framework_rejected(self):
         from secureaudit.cli import cli
         runner = self._runner()
@@ -3378,3 +3539,124 @@ class TestComplianceCLI:
             result = runner.invoke(cli, ["scan", d, "--plugins", "policy", "--fail-below", "0"])
             assert result.exit_code == 0
             assert "Compliance" not in result.output
+
+
+# ── SARIF output ─────────────────────────────────────────────────────────────
+
+class TestSarifOutput:
+    """Validates SARIF output against the REAL official SARIF 2.1.0 schema
+    (bundled in tests/fixtures/, not fetched live — keeps this test fast
+    and not network-dependent), not just "did a file get written"."""
+
+    @staticmethod
+    def _make_result():
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+        result = AuditResult(target="/tmp/fakeproject")
+        result.plugin_results.append(PluginResult(
+            plugin="secrets",
+            findings=[Finding(
+                plugin="secrets", title="Hardcoded API Key", severity=Severity.HIGH,
+                description="Found a hardcoded API key in source.",
+                remediation="Move to environment variables.",
+                file="app/config.py", line=12, evidence="API_KEY = 'sk-12345'",
+                reference="https://example.com/docs",
+            )],
+        ))
+        result.plugin_results.append(PluginResult(
+            plugin="policy",
+            findings=[Finding(
+                plugin="policy", title="Missing license file", severity=Severity.INFO,
+                description="No LICENSE file found at repo root.",
+                remediation=None, file=None, line=None, evidence=None, reference=None,
+            )],
+        ))
+        return result
+
+    @staticmethod
+    def _schema():
+        schema_path = Path(__file__).parent / "fixtures" / "sarif-schema-2.1.0.json"
+        with open(schema_path) as f:
+            return json.load(f)
+
+    def test_output_validates_against_official_schema(self, tmp_path):
+        from secureaudit.reports.sarif import write_sarif
+        out = tmp_path / "out.sarif"
+        write_sarif(self._make_result(), out)
+
+        with open(out) as f:
+            sarif_doc = json.load(f)
+
+        import jsonschema
+        jsonschema.validate(instance=sarif_doc, schema=self._schema())  # raises on failure
+
+    def test_schema_url_is_not_a_dead_link(self):
+        """Regression test: the $schema URL this previously pointed to
+        (.../master/Documents/CommitteeSpecifications/2.1.0/...) 404s — a
+        known, widely-reported issue with the spec's own published
+        examples. Doesn't re-fetch the URL on every test run (network
+        dependency, slow) — just confirms the code still points at the
+        specific path confirmed to actually resolve, so a future edit
+        can't silently reintroduce the dead one."""
+        import inspect
+
+        from secureaudit.reports import sarif as sarif_module
+        source = inspect.getsource(sarif_module)
+        assert "sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json" in source
+        assert "sarif-spec/master/Documents/CommitteeSpecifications" not in source
+
+    def test_findings_with_no_location_omit_locations_field(self, tmp_path):
+        """A finding with no file/line (like the policy finding above)
+        must not produce a malformed or empty locations array — SARIF
+        requires locations entries to have real content if present at all."""
+        from secureaudit.reports.sarif import write_sarif
+        out = tmp_path / "out.sarif"
+        write_sarif(self._make_result(), out)
+        with open(out) as f:
+            sarif_doc = json.load(f)
+        results = sarif_doc["runs"][0]["results"]
+        no_location_result = next(r for r in results if "locations" not in r or not r.get("locations"))
+        assert no_location_result["ruleId"].startswith("policy/")
+
+    def test_severity_mapping_matches_github_conventions(self, tmp_path):
+        """CRITICAL/HIGH -> error, MEDIUM -> warning, INFO -> note/none —
+        confirms the actual written output, not just the internal mapping
+        dict, in case a future refactor changes how it's applied."""
+        from secureaudit.reports.sarif import write_sarif
+        out = tmp_path / "out.sarif"
+        write_sarif(self._make_result(), out)
+        with open(out) as f:
+            sarif_doc = json.load(f)
+        results = sarif_doc["runs"][0]["results"]
+        high_result = next(r for r in results if "secrets/" in r["ruleId"])
+        info_result = next(r for r in results if "policy/" in r["ruleId"])
+        assert high_result["level"] == "error"
+        assert info_result["level"] in ("note", "none")
+
+    def test_rules_are_deduplicated_across_findings(self, tmp_path):
+        """Two findings from the same plugin+title (e.g. the same rule
+        firing on two different files) must produce ONE rule entry, not
+        a duplicate per finding — SARIF rules are meant to be unique
+        per logical check, with multiple results referencing the same rule."""
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+        from secureaudit.reports.sarif import write_sarif
+
+        result = AuditResult(target="/tmp/fakeproject")
+        result.plugin_results.append(PluginResult(
+            plugin="secrets",
+            findings=[
+                Finding(
+                    plugin="secrets", title="Hardcoded API Key", severity=Severity.HIGH,
+                    description="x", remediation=None, file=f, line=1, evidence=None, reference=None,
+                )
+                for f in ("a.py", "b.py")
+            ],
+        ))
+
+        out = tmp_path / "out.sarif"
+        write_sarif(result, out)
+        with open(out) as f:
+            sarif_doc = json.load(f)
+
+        rules = sarif_doc["runs"][0]["tool"]["driver"]["rules"]
+        assert len(rules) == 1
+        assert len(sarif_doc["runs"][0]["results"]) == 2

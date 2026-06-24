@@ -8,7 +8,7 @@ inputs:
     default: "."
     required: false
   plugins:
-    description: Comma-separated list of plugins (default: all)
+    description: "Comma-separated list of plugins (default: all)"
     default: "secrets,cve,filesystem,policy"
     required: false
   fail-below:
@@ -21,6 +21,14 @@ inputs:
     required: false
   output-json:
     description: Path to write JSON report (optional)
+    default: ""
+    required: false
+  sarif-output:
+    description: >-
+      Path to write a SARIF 2.1.0 report (optional). When set, this action
+      also uploads it via github/codeql-action/upload-sarif automatically,
+      so findings show up in the repo's Security tab — set this and you
+      don't need a separate upload step of your own.
     default: ""
     required: false
 
@@ -46,6 +54,7 @@ runs:
         ARGS="--plugins ${{ inputs.plugins }} --fail-below ${{ inputs.fail-below }}"
         if [ -n "${{ inputs.output-html }}" ]; then ARGS="$ARGS --output ${{ inputs.output-html }}"; fi
         if [ -n "${{ inputs.output-json }}" ]; then ARGS="$ARGS --json ${{ inputs.output-json }}"; fi
+        if [ -n "${{ inputs.sarif-output }}" ]; then ARGS="$ARGS --sarif ${{ inputs.sarif-output }}"; fi
 
         # Run and capture output
         PYTHONPATH=${{ github.action_path }} python3 -m secureaudit.cli scan \
@@ -69,3 +78,12 @@ runs:
         name: secureaudit-report
         path: ${{ inputs.output-html }}
         retention-days: 30
+
+    - name: Upload SARIF to GitHub Security tab
+      # always(), not just on success — the audit "failing" its score
+      # threshold is exactly the case where you most want the findings
+      # visible in the Security tab, not less.
+      if: inputs.sarif-output != '' && always()
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ inputs.sarif-output }}
