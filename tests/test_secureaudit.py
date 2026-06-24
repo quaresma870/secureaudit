@@ -4,6 +4,7 @@ Tests for SecureAudit — plugins, engine and models.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -3378,3 +3379,124 @@ class TestComplianceCLI:
             result = runner.invoke(cli, ["scan", d, "--plugins", "policy", "--fail-below", "0"])
             assert result.exit_code == 0
             assert "Compliance" not in result.output
+
+
+# ── SARIF output ─────────────────────────────────────────────────────────────
+
+class TestSarifOutput:
+    """Validates SARIF output against the REAL official SARIF 2.1.0 schema
+    (bundled in tests/fixtures/, not fetched live — keeps this test fast
+    and not network-dependent), not just "did a file get written"."""
+
+    @staticmethod
+    def _make_result():
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+        result = AuditResult(target="/tmp/fakeproject")
+        result.plugin_results.append(PluginResult(
+            plugin="secrets",
+            findings=[Finding(
+                plugin="secrets", title="Hardcoded API Key", severity=Severity.HIGH,
+                description="Found a hardcoded API key in source.",
+                remediation="Move to environment variables.",
+                file="app/config.py", line=12, evidence="API_KEY = 'sk-12345'",
+                reference="https://example.com/docs",
+            )],
+        ))
+        result.plugin_results.append(PluginResult(
+            plugin="policy",
+            findings=[Finding(
+                plugin="policy", title="Missing license file", severity=Severity.INFO,
+                description="No LICENSE file found at repo root.",
+                remediation=None, file=None, line=None, evidence=None, reference=None,
+            )],
+        ))
+        return result
+
+    @staticmethod
+    def _schema():
+        schema_path = Path(__file__).parent / "fixtures" / "sarif-schema-2.1.0.json"
+        with open(schema_path) as f:
+            return json.load(f)
+
+    def test_output_validates_against_official_schema(self, tmp_path):
+        from secureaudit.reports.sarif import write_sarif
+        out = tmp_path / "out.sarif"
+        write_sarif(self._make_result(), out)
+
+        with open(out) as f:
+            sarif_doc = json.load(f)
+
+        import jsonschema
+        jsonschema.validate(instance=sarif_doc, schema=self._schema())  # raises on failure
+
+    def test_schema_url_is_not_a_dead_link(self):
+        """Regression test: the $schema URL this previously pointed to
+        (.../master/Documents/CommitteeSpecifications/2.1.0/...) 404s — a
+        known, widely-reported issue with the spec's own published
+        examples. Doesn't re-fetch the URL on every test run (network
+        dependency, slow) — just confirms the code still points at the
+        specific path confirmed to actually resolve, so a future edit
+        can't silently reintroduce the dead one."""
+        import inspect
+
+        from secureaudit.reports import sarif as sarif_module
+        source = inspect.getsource(sarif_module)
+        assert "sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json" in source
+        assert "sarif-spec/master/Documents/CommitteeSpecifications" not in source
+
+    def test_findings_with_no_location_omit_locations_field(self, tmp_path):
+        """A finding with no file/line (like the policy finding above)
+        must not produce a malformed or empty locations array — SARIF
+        requires locations entries to have real content if present at all."""
+        from secureaudit.reports.sarif import write_sarif
+        out = tmp_path / "out.sarif"
+        write_sarif(self._make_result(), out)
+        with open(out) as f:
+            sarif_doc = json.load(f)
+        results = sarif_doc["runs"][0]["results"]
+        no_location_result = next(r for r in results if "locations" not in r or not r.get("locations"))
+        assert no_location_result["ruleId"].startswith("policy/")
+
+    def test_severity_mapping_matches_github_conventions(self, tmp_path):
+        """CRITICAL/HIGH -> error, MEDIUM -> warning, INFO -> note/none —
+        confirms the actual written output, not just the internal mapping
+        dict, in case a future refactor changes how it's applied."""
+        from secureaudit.reports.sarif import write_sarif
+        out = tmp_path / "out.sarif"
+        write_sarif(self._make_result(), out)
+        with open(out) as f:
+            sarif_doc = json.load(f)
+        results = sarif_doc["runs"][0]["results"]
+        high_result = next(r for r in results if "secrets/" in r["ruleId"])
+        info_result = next(r for r in results if "policy/" in r["ruleId"])
+        assert high_result["level"] == "error"
+        assert info_result["level"] in ("note", "none")
+
+    def test_rules_are_deduplicated_across_findings(self, tmp_path):
+        """Two findings from the same plugin+title (e.g. the same rule
+        firing on two different files) must produce ONE rule entry, not
+        a duplicate per finding — SARIF rules are meant to be unique
+        per logical check, with multiple results referencing the same rule."""
+        from secureaudit.core.models import AuditResult, Finding, PluginResult, Severity
+        from secureaudit.reports.sarif import write_sarif
+
+        result = AuditResult(target="/tmp/fakeproject")
+        result.plugin_results.append(PluginResult(
+            plugin="secrets",
+            findings=[
+                Finding(
+                    plugin="secrets", title="Hardcoded API Key", severity=Severity.HIGH,
+                    description="x", remediation=None, file=f, line=1, evidence=None, reference=None,
+                )
+                for f in ("a.py", "b.py")
+            ],
+        ))
+
+        out = tmp_path / "out.sarif"
+        write_sarif(result, out)
+        with open(out) as f:
+            sarif_doc = json.load(f)
+
+        rules = sarif_doc["runs"][0]["tool"]["driver"]["rules"]
+        assert len(rules) == 1
+        assert len(sarif_doc["runs"][0]["results"]) == 2

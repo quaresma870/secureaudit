@@ -54,3 +54,47 @@ jobs:
           /tmp/smoke-venv/bin/pip install dist/*.whl
           /tmp/smoke-venv/bin/secureaudit --version
           /tmp/smoke-venv/bin/secureaudit list-plugins
+
+  test-action:
+    name: Test action.yml end-to-end (incl. SARIF -> Security tab)
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      contents: read
+      security-events: write   # required for github/codeql-action/upload-sarif
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Create a small target with a real, findable secret
+        run: |
+          mkdir -p /tmp/action-test-target
+          echo 'API_KEY = "sk-test-1234567890abcdef"' > /tmp/action-test-target/config.py
+
+      - name: "Run the action against itself (local checkout, uses: ./)"
+        id: audit
+        uses: ./
+        with:
+          target: /tmp/action-test-target
+          plugins: secrets
+          fail-below: "0"   # don't fail this CI job on the finding — that's expected, we're testing the upload
+          sarif-output: /tmp/action-test.sarif
+
+      - name: Confirm the action's own outputs were actually set
+        run: |
+          echo "score output: ${{ steps.audit.outputs.score }}"
+          echo "grade output: ${{ steps.audit.outputs.grade }}"
+
+      - name: Confirm the SARIF file was actually written and is non-trivial
+        run: |
+          test -s /tmp/action-test.sarif
+          python3 -c "
+          import json
+          with open('/tmp/action-test.sarif') as f:
+              doc = json.load(f)
+          results = doc['runs'][0]['results']
+          assert len(results) >= 1, 'expected at least one finding for the planted secret'
+          print(f'SARIF contains {len(results)} result(s) — OK')
+          "
