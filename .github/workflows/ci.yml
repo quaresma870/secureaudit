@@ -48,12 +48,125 @@ jobs:
         run: python -m build
       - name: Check package metadata
         run: twine check dist/*
-      - name: Install built wheel in a clean venv and smoke-test the CLI
+
+      - name: Install built wheel in a clean venv
         run: |
           python -m venv /tmp/smoke-venv
-          /tmp/smoke-venv/bin/pip install dist/*.whl
-          /tmp/smoke-venv/bin/secureaudit --version
-          /tmp/smoke-venv/bin/secureaudit list-plugins
+          /tmp/smoke-venv/bin/pip install "$(echo dist/*.whl)[dashboard]"
+
+      - name: "Integration test: every README-documented command, against the real installed wheel"
+        # This is the exact gap that let 5 real bugs (schedule, digest,
+        # serve, pre-commit install) ship past 290+ passing unit tests:
+        # those tests exercise individual functions/components in
+        # isolation, never the actual installed CLI a real user runs.
+        # Reproducing every one of those bugs here first (each step below
+        # is annotated with which bug it would have caught) before fixing
+        # this gap, not assumed sufficient from the list alone.
+        run: |
+          set -euo pipefail
+          SA=/tmp/smoke-venv/bin/secureaudit
+          WORK=$(mktemp -d)
+          cd "$WORK"
+
+          echo "::group::Set up a realistic test project"
+          git init -q
+          git config user.email "ci@example.com"
+          git config user.name "CI"
+          cat > app.py << 'PYEOF'
+          API_KEY = "sk-live-abcdef1234567890ABCDEF"
+          PYEOF
+          cat > Dockerfile << 'DOCKEREOF'
+          FROM python:latest
+          ADD . /app
+          CMD ["python", "app.py"]
+          DOCKEREOF
+          echo "flask==2.0.1" > requirements.txt
+          git add -A
+          git commit -q -m "initial"
+          echo "::endgroup::"
+
+          echo "::group::init --yes"
+          $SA init . --yes --no-baseline
+          test -f secureaudit.yml
+          echo "::endgroup::"
+
+          echo "::group::scan (plain, --plugins, --output/--json, --fail-below)"
+          # The test project is deliberately insecure (real findings are the
+          # point, to confirm detection works) -- these are expected to
+          # exit 1 on the default 70-threshold, hence || true. --fail-below 0
+          # below is the one call actually exercising a passing exit code.
+          $SA scan . --plugins secrets,policy || true
+          $SA scan . --output report.html --json report.json || true
+          test -s report.html
+          test -s report.json
+          $SA scan . --fail-below 0
+          echo "::endgroup::"
+
+          echo "::group::baseline + scan --db (build history for diff)"
+          $SA baseline .
+          $SA scan . --db audits.db --fail-below 0
+          echo 'AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"' > newfile.py
+          $SA scan . --db audits.db --fail-below 0
+          echo "::endgroup::"
+
+          echo "::group::diff previous latest -- would have caught nothing here (already covered), confirms it stays correct"
+          $SA diff previous latest --db audits.db || true   # exit 1 on regression is expected/correct here
+          echo "::endgroup::"
+
+          echo "::group::digest . --db audits.db -- would have caught the 'scan . then digest .' silent-empty-result bug"
+          OUTPUT=$($SA digest . --db audits.db)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "score=" || (echo "digest printed no rows for target '.' -- target-resolution regression" && exit 1)
+          echo "::endgroup::"
+
+          echo "::group::pre-commit install + a real git commit with a real secret -- would have caught the bare-command/PATH bug"
+          $SA pre-commit install
+          echo 'GITHUB_TOKEN = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890"' > leaked.py
+          git add leaked.py
+          # Deliberately stripped-down PATH, simulating a GUI git client or a
+          # fresh shell without this venv activated -- the exact scenario the
+          # original bug failed silently in.
+          if env -i HOME="$HOME" PATH="/usr/bin:/bin" git commit -m "should be blocked" 2>&1; then
+            echo "Commit with a real secret was NOT blocked -- pre-commit hook regression"
+            exit 1
+          fi
+          git reset -q leaked.py
+          rm -f leaked.py
+          echo "::endgroup::"
+
+          echo "::group::serve -- would have caught the missing-fastapi-check / Rich-markup-bracket bug, and confirms the dashboard actually serves real data"
+          $SA serve --db audits.db --port 8123 &
+          SERVE_PID=$!
+          sleep 2
+          curl -sf http://127.0.0.1:8123/ -o /dev/null
+          curl -sf http://127.0.0.1:8123/api/runs -o /tmp/runs.json
+          python3 -c "import json; data = json.load(open('/tmp/runs.json')); assert len(data) > 0, 'no runs returned'"
+          kill $SERVE_PID
+          wait $SERVE_PID 2>/dev/null || true
+          echo "::endgroup::"
+
+          echo "::group::schedule -- would have caught the dead-import crash-on-every-invocation bug"
+          OUTPUT=$(timeout 8 $SA schedule . --cron "0 6 * * 1" --db audits.db 2>&1 || true)
+          echo "$OUTPUT"
+          if echo "$OUTPUT" | grep -qi "traceback\|ModuleNotFoundError"; then
+            echo "schedule crashed -- regression"
+            exit 1
+          fi
+          echo "$OUTPUT" | grep -q "Security Score" || (echo "schedule's immediate run never printed a summary" && exit 1)
+          echo "::endgroup::"
+
+          echo "::group::compliance-report (both frameworks)"
+          $SA scan . --compliance-report owasp-asvs --fail-below 0
+          $SA scan . --compliance-report cis-docker --fail-below 0
+          echo "::endgroup::"
+
+          echo "::group::cache status/clear, list-plugins"
+          $SA cache status .
+          $SA cache clear .
+          $SA list-plugins
+          echo "::endgroup::"
+
+          echo "All integration checks passed."
 
   test-action:
     name: Test action.yml end-to-end (incl. SARIF -> Security tab)
