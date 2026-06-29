@@ -9,8 +9,10 @@ secrets scan when invoked.
 
 from __future__ import annotations
 
+import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 from secureaudit.core.models import Severity
@@ -20,9 +22,34 @@ _HOOK_MARKER = "# Installed by: secureaudit pre-commit install"
 _HOOK_TEMPLATE = """#!/usr/bin/env bash
 {marker}
 # To skip this check for a single commit (not recommended): git commit --no-verify
-secureaudit pre-commit run
+{command} pre-commit run
 exit $?
 """
+
+
+def _resolve_secureaudit_command() -> str:
+    """Absolute path to the secureaudit executable installing this hook,
+    not the bare command name. A git hook runs in whatever PATH git
+    itself uses at commit time, which commonly does NOT include an
+    unactivated virtualenv's bin/ directory — a GUI git client, an IDE's
+    git integration, or just a fresh terminal tab that hasn't run
+    `source venv/bin/activate` all hit exactly this. Resolving and
+    baking in the absolute path at install time, when we know for
+    certain which secureaudit this is (sys.executable's own sibling, the
+    same bin/Scripts directory pip installed the console script into),
+    avoids the hook silently failing with 'command not found' in exactly
+    those common scenarios — confirmed by actually reproducing that
+    failure (a real venv install, hook fires from a shell where that
+    venv's bin/ isn't on PATH) before fixing it, not assumed as a risk."""
+    interpreter_dir = Path(sys.executable).parent
+    for name in ("secureaudit", "secureaudit.exe"):
+        candidate = interpreter_dir / name
+        if candidate.exists():
+            return str(candidate)
+    # Fall back to PATH resolution for unusual installs where the console
+    # script doesn't live next to the interpreter (e.g. some pipx/Homebrew
+    # layouts) — still better than a guaranteed-wrong absolute path.
+    return shutil.which("secureaudit") or "secureaudit"
 
 
 def get_git_root(start: Path | None = None) -> Path | None:
@@ -81,7 +108,7 @@ def install_hook(repo_root: Path, force: bool = False) -> tuple[bool, str]:
                 "Use --force to overwrite."
             )
 
-    hook_path.write_text(_HOOK_TEMPLATE.format(marker=_HOOK_MARKER))
+    hook_path.write_text(_HOOK_TEMPLATE.format(marker=_HOOK_MARKER, command=_resolve_secureaudit_command()))
     mode = hook_path.stat().st_mode
     hook_path.chmod(mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return True, str(hook_path)

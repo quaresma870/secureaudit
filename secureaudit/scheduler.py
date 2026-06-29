@@ -78,7 +78,7 @@ def run_schedule(
 
     from secureaudit.core.config import load_config
     from secureaudit.core.engine import AuditEngine
-    from secureaudit.output.terminal import print_summary
+    from secureaudit.reports.terminal import print_summary
 
     cfg = load_config(config_path)
     engine = AuditEngine(cfg)

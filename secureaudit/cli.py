@@ -12,7 +12,6 @@ from pathlib import Path
 import click
 from rich import box
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 from secureaudit.compliance import FRAMEWORKS
@@ -20,6 +19,7 @@ from secureaudit.core.config import load_config
 from secureaudit.core.engine import AuditEngine
 from secureaudit.core.models import Severity
 from secureaudit.plugins import available_plugins
+from secureaudit.reports.terminal import print_summary
 
 console = Console()
 
@@ -192,7 +192,7 @@ def scan(
     )
 
     if not no_terminal:
-        _print_result(result, threshold)
+        print_summary(result, threshold)
 
     if compliance_report:
         rows = FRAMEWORKS[compliance_report](result)
@@ -340,75 +340,6 @@ def list_plugins():
     console.print()
 
 
-def _print_result(result, threshold: int) -> None:
-    score = result.score
-    grade = result.grade
-    counts = result.counts_by_severity()
-
-    score_color = "red" if score < 60 else "yellow" if score < 75 else "green"
-    status = "✘ FAIL" if score < threshold else "✔ PASS"
-    status_color = "red" if score < threshold else "green"
-    suppressed_line = ""
-    if result.suppressed_findings:
-        suppressed_line = f"\n[dim]🔇 {len(result.suppressed_findings)} suppressed (baseline/inline — not counted in score)[/dim]"
-
-    # Score panel
-    console.print(Panel(
-        f"[{score_color}][bold]{score}/100[/bold][/{score_color}]  Grade [{score_color}]{grade}[/{score_color}]"
-        f"  [{status_color}]{status}[/{status_color}]  "
-        f"[dim](threshold: {threshold})[/dim]\n"
-        f"[bold red]■[/bold red] {counts.get('CRITICAL',0)} Critical  "
-        f"[red]■[/red] {counts.get('HIGH',0)} High  "
-        f"[yellow]■[/yellow] {counts.get('MEDIUM',0)} Medium  "
-        f"[blue]■[/blue] {counts.get('LOW',0)} Low  "
-        f"[dim]■[/dim] {counts.get('INFO',0)} Info"
-        f"{suppressed_line}",
-        title="Security Score",
-        border_style=score_color,
-    ))
-
-    # Plugin summary
-    t = Table(title="Plugin Results", box=box.SIMPLE_HEAD)
-    t.add_column("Plugin", style="cyan")
-    t.add_column("Score", justify="right")
-    t.add_column("Findings", justify="right")
-    t.add_column("Status")
-    t.add_column("Duration")
-    for pr in result.plugin_results:
-        status_str = "[red]✘ FAIL[/red]" if not pr.passed else "[green]✔ PASS[/green]"
-        if pr.error:
-            status_str = "[yellow]⚠ ERROR[/yellow]"
-        t.add_row(
-            pr.plugin,
-            f"[{'green' if pr.score >= 80 else 'yellow' if pr.score >= 60 else 'red'}]{pr.score}[/]",
-            str(len(pr.findings)),
-            status_str,
-            f"{pr.duration_ms:.0f}ms",
-        )
-    console.print(t)
-
-    # Findings (non-INFO)
-    findings = [f for f in result.all_findings if f.severity != Severity.INFO]
-    if findings:
-        t2 = Table(title="Findings", box=box.SIMPLE_HEAD, show_lines=True)
-        t2.add_column("Sev", width=10)
-        t2.add_column("Plugin", width=12)
-        t2.add_column("Title", overflow="fold")
-        t2.add_column("File", overflow="fold", width=30)
-        for f in sorted(findings, key=lambda x: list(Severity).index(x.severity)):
-            color = _SEV_COLOR.get(f.severity, "white")
-            file_str = f.file or ""
-            if f.line:
-                file_str += f":{f.line}"
-            t2.add_row(
-                f"[{color}]{f.severity.value}[/]",
-                f.plugin,
-                f.title,
-                file_str,
-            )
-        console.print(t2)
-    else:
-        console.print("[green]  No significant findings.[/green]\n")
 
 
 
@@ -424,9 +355,16 @@ def _print_result(result, threshold: int) -> None:
 def serve(db, host, port, token):
     """Start the web dashboard for audit history."""
     try:
-        import uvicorn
+        # fastapi is imported here too, not left for dashboard.app's own
+        # import to surface — confirmed by actually reproducing this
+        # exact failure (uvicorn present, fastapi absent) and getting a
+        # raw, unhandled ModuleNotFoundError traceback instead of this
+        # same clean message, before adding the explicit check.
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
     except ImportError:
-        console.print("[red]uvicorn is required: pip install uvicorn[/red]")
+        console.print("[red]Dashboard dependencies missing.[/red]")
+        console.print("Install with: pip install 'secureaudit\\[dashboard]'")
         sys.exit(1)
 
     import os
@@ -532,7 +470,15 @@ def digest(target, db, days, slack_webhook):
 
     cutoff = datetime.now(UTC) - timedelta(days=days)
     all_runs = get_runs(db, limit=200)
-    runs = [r for r in all_runs if r["target"] == target]
+    # AuditEngine resolves target to an absolute path before it's ever
+    # stored (core/engine.py) — comparing against the raw CLI argument
+    # ("." being the overwhelmingly common case, exactly what this
+    # project's own README leads with) would silently match nothing.
+    # Reproduced this for real before fixing it: `scan .` then
+    # `digest .` printed "printing digest instead" followed by zero
+    # actual rows, not an error — just silently wrong.
+    resolved_target = str(Path(target).resolve())
+    runs = [r for r in all_runs if r["target"] == resolved_target]
     runs = [r for r in runs if datetime.fromisoformat(r["timestamp"]) >= cutoff] or runs[:1]
 
     if not slack_webhook:
