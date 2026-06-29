@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.6.2
+- feat: **CI integration-test tier** — extended the build job's minimal smoke test into a real
+  integration test covering every README-documented command against the actual installed wheel in
+  a fresh venv: `init`, `scan` (several flag combinations), `baseline`, `diff`, `digest`,
+  `pre-commit install` followed by an actual `git commit` with a real secret under a deliberately
+  stripped-down PATH, `serve` with real HTTP requests, `schedule` with a real timed run, both
+  compliance frameworks, and `cache`/`list-plugins` — closes #31. None of the five bugs fixed in
+  v1.6.1 were possible to catch with unit tests alone, which exercise individual functions in
+  isolation, never the actual installed CLI a real user runs. Verified to actually catch a
+  regression by temporarily reintroducing the v1.6.1 scheduler bug and confirming this job fails.
+
 ### v1.6.1
 - fix: **`schedule` crashed on every single invocation** — `run_schedule()`'s job() imported from a
   module that has never existed anywhere in this codebase (`secureaudit.output.terminal`).
