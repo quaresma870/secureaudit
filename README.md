@@ -253,6 +253,31 @@ secureaudit/
 
 ---
 
+## CI
+
+On every push/PR: lint → unit tests (290+, mocked/isolated) → build the real
+wheel, install it in a clean venv, and run a **real integration test** —
+every README-documented command, against the actual installed CLI, in a
+real test project: `init`, `scan` (several flag combinations), `baseline`,
+`diff`, `digest`, `pre-commit install` followed by an actual `git commit`
+with a real secret (confirmed blocked, with a deliberately stripped-down
+`PATH` simulating a GUI git client or unactivated venv), `serve` (real HTTP
+requests against the running dashboard), `schedule` (a real timed run,
+confirming the immediate first job doesn't crash), both compliance
+frameworks, and the cache/list-plugins commands.
+
+This exists because five real bugs (`schedule` crashing on every
+invocation, `digest` silently finding nothing for the most common usage
+pattern, `serve` dumping a raw traceback, the pre-commit hook's PATH
+fragility, and the fix for that last one's own error message) all shipped
+past 290+ passing unit tests, because those tests exercise individual
+functions and components in isolation — never the actual installed CLI a
+real user runs. Confirmed this job actually catches a regression by
+temporarily reintroducing one of those five bugs and watching it fail,
+before relying on it.
+
+---
+
 ## Running tests
 
 ```bash
