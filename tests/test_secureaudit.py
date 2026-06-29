@@ -337,6 +337,41 @@ class TestScheduler:
         with pytest.raises((ValueError, RuntimeError)):
             _parse_cron("not a cron", lambda: None)
 
+    def test_run_schedule_immediate_job_does_not_crash(self, monkeypatch):
+        """Regression test for a real, reproduced bug: run_schedule's
+        job() imported `from secureaudit.output.terminal import
+        print_summary` — a module that doesn't exist anywhere in this
+        codebase (secureaudit/output/ has never existed; the function it
+        was looking for lives in secureaudit/reports/terminal.py). Every
+        single `secureaudit schedule` invocation crashed immediately with
+        ModuleNotFoundError, before even completing its first
+        "runs immediately on start" job — confirmed by actually running
+        the installed CLI command for real, not caught by the existing
+        cron-parsing-only tests above, which never actually call
+        run_schedule() at all.
+
+        Lets job() actually execute for real (the only way to exercise
+        the broken import at all, since it's a closure inside
+        run_schedule — not separately callable), then breaks the
+        otherwise-infinite while loop via a simulated KeyboardInterrupt
+        on the first run_pending() call, the same clean-exit path Ctrl+C
+        takes."""
+        import schedule as schedule_lib
+
+        from secureaudit.scheduler import run_schedule
+
+        monkeypatch.setattr(schedule_lib, "run_pending", lambda: (_ for _ in ()).throw(KeyboardInterrupt))
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            # Must not raise — confirms the import inside job() actually
+            # resolves, not just that _parse_cron (called separately,
+            # before job() ever runs) succeeds.
+            run_schedule(
+                target=d, cron_expr="0 6 * * 1", plugins=["policy"], db=None,
+                alert_webhook=None, fail_below=70, output_dir=None, config_path=None,
+            )
+
 
 # ── SAST Plugin ───────────────────────────────────────────────────────────────
 
@@ -945,6 +980,72 @@ class TestPrecommitHookManagement:
             hook_path = Path(path)
             assert hook_path.exists()
             assert hook_path.stat().st_mode & 0o111  # executable bits set
+
+    def test_install_hook_uses_absolute_path_not_bare_command(self):
+        """Regression test for a real, reproduced bug: the hook used to
+        call bare `secureaudit pre-commit run`, trusting PATH at commit
+        time — which a real venv install + a fresh shell without that
+        venv activated genuinely does not have, producing a silent
+        'command not found' that lets a commit with a real secret through
+        instead of blocking it (the opposite of this feature's entire
+        purpose). The hook must reference an absolute path resolved at
+        install time instead, when we know for certain which secureaudit
+        this is. Mocks the resolver itself, since whether THIS specific
+        test environment happens to have a real sibling executable next
+        to sys.executable is a separate concern (covered by the resolver's
+        own tests below) from confirming install_hook actually uses
+        whatever it returns."""
+        from unittest.mock import patch
+
+        from secureaudit.core.precommit import install_hook
+
+        with tempfile.TemporaryDirectory() as d:
+            _init_git_repo(d)
+            with patch(
+                "secureaudit.core.precommit._resolve_secureaudit_command",
+                return_value="/opt/myvenv/bin/secureaudit",
+            ):
+                ok, path = install_hook(Path(d))
+            assert ok
+            content = Path(path).read_text()
+            assert "\nsecureaudit pre-commit run\n" not in content
+            assert "/opt/myvenv/bin/secureaudit pre-commit run" in content
+
+    def test_resolve_secureaudit_command_prefers_interpreter_sibling(self):
+        """When a 'secureaudit' executable sits next to sys.executable
+        (the normal pip/venv install layout), that exact path is used —
+        not whatever 'secureaudit' happens to resolve to via PATH, which
+        could be a different installed version entirely."""
+        from unittest.mock import patch
+
+        from secureaudit.core.precommit import _resolve_secureaudit_command
+
+        with tempfile.TemporaryDirectory() as d:
+            fake_interpreter = Path(d) / "python3"
+            fake_interpreter.touch()
+            fake_secureaudit = Path(d) / "secureaudit"
+            fake_secureaudit.touch()
+
+            with patch("sys.executable", str(fake_interpreter)):
+                resolved = _resolve_secureaudit_command()
+            assert resolved == str(fake_secureaudit)
+
+    def test_resolve_secureaudit_command_falls_back_to_path(self):
+        """No executable next to sys.executable at all (an unusual
+        install layout) — falls back to PATH resolution rather than
+        baking in a path that's guaranteed not to exist."""
+        from unittest.mock import patch
+
+        from secureaudit.core.precommit import _resolve_secureaudit_command
+
+        with tempfile.TemporaryDirectory() as d:
+            fake_interpreter = Path(d) / "python3"
+            fake_interpreter.touch()
+
+            with patch("sys.executable", str(fake_interpreter)), \
+                 patch("shutil.which", return_value="/usr/local/bin/secureaudit"):
+                resolved = _resolve_secureaudit_command()
+            assert resolved == "/usr/local/bin/secureaudit"
 
     def test_install_hook_fails_without_git_dir(self):
         from secureaudit.core.precommit import install_hook
@@ -1575,6 +1676,46 @@ class TestNotificationCLIIntegration:
 
             result = runner.invoke(cli, ["digest", d, "--db", db, "--days", "7"])
             assert result.exit_code == 0, result.output
+            # The earlier version of this test only checked exit_code,
+            # which a silently-empty digest also satisfies — strengthened
+            # after finding exactly that (see the regression test below).
+            assert "printing digest instead" in result.output
+            assert "score=" in result.output
+
+    def test_digest_command_target_dot_matches_absolute_stored_target(self):
+        """Regression test for a real, reproduced bug: AuditEngine
+        resolves target to an absolute path before it's ever stored
+        (core/engine.py) — `secureaudit scan .` (this project's own
+        README's primary example) stores the resolved absolute path, not
+        the literal '.'. digest's target filter used to compare against
+        the raw CLI argument with no resolution, so `secureaudit digest .`
+        right after `secureaudit scan .` printed "printing digest
+        instead" followed by zero actual rows — not an error, just
+        silently wrong, for the most common possible usage pattern."""
+        import os
+
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import save
+
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            resolved_d = str(Path(d).resolve())
+            db = str(Path(d) / "audits.db")
+            # Stored exactly as AuditEngine would: the resolved absolute path.
+            save(_make_audit_result(resolved_d, []), db)
+
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                result = runner.invoke(cli, ["digest", ".", "--db", db, "--days", "7"])
+            finally:
+                os.chdir(original_cwd)
+
+            assert result.exit_code == 0, result.output
+            assert "score=" in result.output, (
+                f"digest '.' found no rows even though a run for the resolved "
+                f"absolute path exists — target resolution regressed.\n{result.output}"
+            )
 
     def test_digest_command_missing_db(self):
         from secureaudit.cli import cli
@@ -2930,6 +3071,59 @@ class TestServeCommandTokenLogic:
         result = runner.invoke(cli, ["serve", "--help"])
         assert result.exit_code == 0
         assert "--token" in result.output
+
+
+class TestServeMissingDashboardDeps:
+    """Regression tests for a real, reproduced bug: serve only checked
+    `import uvicorn`, with `import fastapi` left for dashboard.app's own
+    module-level import statement to surface. If uvicorn happened to be
+    installed but fastapi wasn't, the user got a raw, unhandled
+    ModuleNotFoundError traceback instead of the same clean error message
+    — confirmed by actually installing only one of the two in a real
+    clean venv and triggering it, not assumed as a theoretical risk."""
+
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    @staticmethod
+    def _block_import(*names):
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name in names:
+                raise ImportError(f"simulated: {name} not installed")
+            return real_import(name, *args, **kwargs)
+        return fake_import
+
+    def test_missing_uvicorn_shows_clean_message(self):
+        import builtins
+        from unittest.mock import patch
+
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with patch.object(builtins, "__import__", side_effect=self._block_import("uvicorn")):
+            result = runner.invoke(cli, ["serve"])
+        assert result.exit_code == 1
+        assert "Dashboard dependencies missing" in result.output
+        assert "secureaudit[dashboard]" in result.output
+        assert "Traceback" not in result.output
+
+    def test_missing_fastapi_shows_clean_message_not_raw_traceback(self):
+        """The specific bug: uvicorn present, fastapi absent."""
+        import builtins
+        from unittest.mock import patch
+
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with patch.object(builtins, "__import__", side_effect=self._block_import("fastapi")):
+            result = runner.invoke(cli, ["serve"])
+        assert result.exit_code == 1
+        assert "Dashboard dependencies missing" in result.output
+        assert "secureaudit[dashboard]" in result.output
+        assert "Traceback" not in result.output
+        assert "ModuleNotFoundError" not in result.output
 
 
 # ── Compliance: OWASP ASVS mapping ───────────────────────────────────────────

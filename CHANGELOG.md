@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.6.1
+- fix: **`schedule` crashed on every single invocation** — `run_schedule()`'s job() imported from a
+  module that has never existed anywhere in this codebase (`secureaudit.output.terminal`).
+  Extracted the rendering logic into a real, shared `reports/terminal.py` that both `scan` and
+  `schedule` import correctly. Found by building the real wheel, installing it in a clean venv, and
+  running every command this README documents, literally as written — not caught by the existing
+  test suite, which only tested the cron-parsing helper in isolation, never `run_schedule()` itself.
+- fix: **`digest` silently found nothing** for the single most common usage pattern possible:
+  `scan .` followed by `digest .` (this README's own lead example). `AuditEngine` resolves `target`
+  to an absolute path before storing it; `digest` compared against the raw, unresolved CLI argument.
+- fix: **`serve` dumped a raw traceback** if `uvicorn` was installed but `fastapi` wasn't — only one
+  of the two was guarded. Both checked explicitly now, pointing at the real `secureaudit[dashboard]`
+  extra — whose name had to be fixed *again* after the first attempt: Rich's console markup parser
+  treats square brackets as tag syntax, silently stripping an unescaped `[dashboard]` from the
+  visible output.
+- fix: **the pre-commit hook could silently let secrets through** — the generated hook called bare
+  `secureaudit pre-commit run`, trusting PATH resolution at commit time, which a real venv install +
+  a GUI git client or fresh shell genuinely does not have. Now bakes in the absolute path to the
+  specific installation doing the `pre-commit install`, resolved at install time.
+- test: 8 new regression tests, each confirmed (by temporarily reverting its corresponding fix) to
+  actually fail against the original broken code, not just pass against the fixed version.
+
 ### v1.6.0
 - fix: **`action.yml` was broken YAML from the start** — an unquoted colon inside a plain-scalar
   description (`(default: all)`) made the entire file invalid YAML, confirmed against the version

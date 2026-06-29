@@ -238,7 +238,8 @@ secureaudit/
 │   └── reports/
 │       ├── html.py             # Self-contained HTML with Chart.js
 │       ├── json_report.py      # JSON serialiser
-│       └── sarif.py            # SARIF 2.1.0 — GitHub Security tab integration
+│       ├── sarif.py            # SARIF 2.1.0 — GitHub Security tab integration
+│       └── terminal.py         # Rich terminal rendering — shared by `scan` and `schedule`
 ├── tests/
 │   ├── test_secureaudit.py     # 272 tests
 │   └── fixtures/
