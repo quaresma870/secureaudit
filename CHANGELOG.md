@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.6.5
+- feat: **exhaustive per-plugin functional audit** — `cors`, `sast`, `malware`, `network`, and
+  `http` plugins (the ones not exercised by the recent end-to-end command-level audit) run
+  correctly end-to-end against a real test target, with confirmed graceful degradation when an
+  external dependency (semgrep, clamav, trivy) genuinely isn't installed — closes #30. New
+  `TestAllPluginsRunWithoutCrashing` includes a meta-test that loops every registered plugin
+  through `AuditEngine.run()`, so a future new plugin gets this same coverage automatically.
+- fix: restored `TestDocumentationFreshness` (#32), which had been unintentionally reverted by a
+  `git checkout` used mid-session to undo an unrelated temporary test — caught by noticing it was
+  simply absent from a subsequent test run's output, not by a failure. README's test count
+  corrected to the current real 301.
+
 ### v1.6.4
 - docs: **secrets plugin limitations** — documented the entropy-detection blind spots in the README: low-entropy values (human-chosen passwords) are never flagged by design, scanning is context-free (cannot distinguish a real key from one in a comment/fixture), and there is no secrets-manager-integration awareness — closes #33. Includes a concrete recommendation for complementary tooling (trufflehog, detect-secrets) to cover what this tool will not catch.
 - feat: **publish pipeline — wheel content verification** — new step in publish.yml confirms all critical modules (including recently-added terminal.py, cis_docker.py, sarif.py, precommit.py, scheduler.py) are actually present inside the built wheel, not just in the source tree — closes #34.
