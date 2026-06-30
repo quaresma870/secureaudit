@@ -42,6 +42,38 @@ jobs:
           pip install twine
           twine check dist/*
 
+      - name: Verify critical modules are present in the wheel
+        # Confirms that new modules added since the last release (e.g.
+        # reports/terminal.py, compliance/cis_docker.py) actually ended
+        # up inside the built wheel — package-data misconfigurations
+        # and import-path changes can cause modules to silently go
+        # missing from the distribution while everything still works
+        # in the dev source tree.
+        run: |
+          python3 << 'PYEOF'
+          import zipfile, sys
+          from pathlib import Path
+
+          whl = next(Path("dist").glob("*.whl"))
+          print(f"Checking {whl.name}")
+          with zipfile.ZipFile(whl) as z:
+              names = z.namelist()
+
+          critical = [
+              "secureaudit/compliance/cis_docker.py",
+              "secureaudit/compliance/owasp_asvs.py",
+              "secureaudit/core/precommit.py",
+              "secureaudit/reports/terminal.py",
+              "secureaudit/reports/sarif.py",
+              "secureaudit/scheduler.py",
+          ]
+          missing = [f for f in critical if f not in names]
+          if missing:
+              print(f"MISSING from wheel: {missing}", file=sys.stderr)
+              sys.exit(1)
+          print(f"OK: {len(names)} files, all {len(critical)} critical modules present")
+          PYEOF
+
       # Trusted publishing (OIDC) — no PYPI_API_TOKEN secret needed.
       # Configure this once at https://pypi.org/manage/project/secureaudit/settings/publishing/
       - name: Publish to PyPI
