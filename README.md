@@ -19,7 +19,7 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 - ✅ **SARIF 2.1.0 output** — validated against the official schema, wired into the GitHub Action for automatic Security tab integration
 - ✅ **GitHub Action** — block PRs if score drops below threshold
 - ✅ **Config file** — `secureaudit.yml` for full customisation
-- ✅ **294 tests** — models, plugins, engine, dashboard, compliance, SARIF
+- ✅ **301 tests** — models, plugins, engine, dashboard, compliance, SARIF
 
 ---
 
