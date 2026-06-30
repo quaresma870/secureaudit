@@ -3,6 +3,10 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.6.3
+- feat: **documentation freshness check** — `TestDocumentationFreshness` now runs on every `pytest` invocation, asserting the README's stated test count and plugin count match the real values, with a clear message pointing at the fix needed — closes #32. Confirmed to catch drift by temporarily adding a dummy test without updating the README.
+- fix: README's test count updated from the stale 285 to the real 294 (9 tests added during the recent audit sprint were not reflected).
+
 ### v1.6.2
 - feat: **CI integration-test tier** — extended the build job's minimal smoke test into a real
   integration test covering every README-documented command against the actual installed wheel in
