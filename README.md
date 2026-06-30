@@ -27,7 +27,7 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 
 | Plugin | What it checks |
 |--------|---------------|
-| `secrets` | API keys, tokens, passwords, private keys — regex + entropy filter |
+| `secrets` | API keys, tokens, passwords, private keys — regex + entropy filter. See [limitations note below](#secrets-plugin-limitations). |
 | `cve` | Dependency CVEs via [OSV.dev](https://osv.dev) — PyPI, npm, Go |
 | `filesystem` | Sensitive committed files, world-writable files, SUID bits |
 | `http` | Security headers (HSTS, CSP, X-Frame-Options…), SSL expiry, redirects |
@@ -38,6 +38,29 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 | `sast` | Static code analysis via Semgrep — SQLi, command injection, SSRF, etc. (opt-in) |
 | `malware` | Known malware signatures via ClamAV — supply-chain attacks (opt-in) |
 | `trivy` | Container/filesystem CVEs + IaC misconfig via Trivy (opt-in) |
+
+### Secrets plugin limitations
+
+Detection combines **regex patterns** (for well-known token shapes like AWS, GitHub, Stripe keys)
+with an **entropy filter** (for generic high-randomness strings). This works well for the kinds of
+secrets that actually appear in production breaches — real API keys and bearer tokens are
+high-entropy by construction — but has predictable blind spots you should know about:
+
+- **Low-entropy values are never flagged**, regardless of variable name. `PASSWORD = "hunter2"`,
+  `DB_PASS = "changeme"`, or any value that looks like a human-chosen password will not be
+  detected. The entropy threshold exists to avoid a flood of false positives on placeholder-looking
+  values, but it means this is not a substitute for a policy rule on password patterns.
+- **Context-free**: a high-entropy string in a comment, a test fixture, or a vendored file looks
+  identical to a real credential. Suppression comments (`# secureaudit-ignore`) are the intended
+  mechanism for known false positives.
+- **No secrets manager integration**: values fetched at runtime from environment variables or
+  secrets managers are not visible in a static scan — which is correct behaviour (they're not in
+  the source), but means this tool cannot verify that you're *using* a secrets manager rather than
+  hardcoding values in config files not covered by the scan target.
+
+**Recommendation**: use this as one layer in a defense-in-depth approach. For the blind spots
+above, a dedicated secrets-scanning tool (e.g. `trufflehog`, `detect-secrets`) with its own
+pattern library for known low-entropy formats pairs well with this tool's broader posture scoring.
 
 ---
 
