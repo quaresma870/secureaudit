@@ -664,6 +664,7 @@ def projects(db):
 _FRAMEWORK_DISPLAY_NAMES = {
     "owasp-asvs": "OWASP ASVS v4.0.3",
     "cis-docker": "CIS Docker Benchmark (Section 4)",
+    "pci-dss": "PCI-DSS v4.0 (Requirement 6, partial)",
 }
 
 _COMPLIANCE_STATUS_COLOR = {
