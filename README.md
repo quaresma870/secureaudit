@@ -19,7 +19,7 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 - ✅ **SARIF 2.1.0 output** — validated against the official schema, wired into the GitHub Action for automatic Security tab integration
 - ✅ **GitHub Action** — block PRs if score drops below threshold
 - ✅ **Config file** — `secureaudit.yml` for full customisation
-- ✅ **301 tests** — models, plugins, engine, dashboard, compliance, SARIF
+- ✅ **313 tests** — models, plugins, engine, dashboard, compliance, SARIF
 
 ---
 
@@ -161,6 +161,11 @@ secureaudit scan . --compliance-report owasp-asvs --compliance-output compliance
 # sections need a live Docker host to evaluate)
 secureaudit scan . --compliance-report cis-docker
 
+# PCI-DSS v4.0 (Requirement 6, partial — common software vulnerabilities
+# via `sast`, and vulnerability identification via `cve`/`trivy`; the
+# rest of Requirement 6 covers process/documentation this tool can't see)
+secureaudit scan . --compliance-report pci-dss
+
 # List available plugins
 secureaudit list-plugins
 ```
@@ -255,7 +260,8 @@ secureaudit/
 │   │   └── policy.py           # Dockerfile, .gitignore, CI checks
 │   ├── compliance/
 │   │   ├── owasp_asvs.py       # OWASP ASVS v4.0.3 control-by-control mapping
-│   │   └── cis_docker.py       # CIS Docker Benchmark Section 4 mapping
+│   │   ├── cis_docker.py       # CIS Docker Benchmark Section 4 mapping
+│   │   └── pci_dss.py          # PCI-DSS v4.0 Requirement 6 (partial) mapping
 │   ├── dashboard/
 │   │   └── app.py              # FastAPI dashboard — history, projects, webhooks
 │   └── reports/

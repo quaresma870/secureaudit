@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.7.0
+- feat: **PCI-DSS v4.0 compliance framework** — `--compliance-report pci-dss` — a deliberately
+  conservative subset of PCI-DSS v4.0 Requirement 6: control 6.2.4 (common software
+  vulnerabilities — injection flaws and XSS, mapped to `sast` findings) and control 6.3.1
+  (vulnerability identification via industry-recognized sources, mapped to `cve`/`trivy`
+  findings) — closes #36. Deliberately scoped to just these two controls: the rest of
+  Requirement 6 describes organisational process, documentation, or temporal state this tool
+  has no visibility into from a static repo checkout — same reasoning `cis_docker.py` gives for
+  its own Section-4-only scope. Confirmed the real, current PCI-DSS v4.0 control numbering
+  against multiple independent sources before mapping anything.
+- test: 12 new tests covering both controls, the trivy CVE-vs-IaC-misconfig distinction, baseline
+  suppression, registry wiring, and CLI reachability. Caught a real gap in the suppression test's
+  own skip logic during development — a non-empty INFO "Semgrep not installed" finding fooled a
+  naive skip-check into reporting a false PASS without exercising real suppression logic.
+
 ### v1.6.5
 - feat: **exhaustive per-plugin functional audit** — `cors`, `sast`, `malware`, `network`, and
   `http` plugins (the ones not exercised by the recent end-to-end command-level audit) run
