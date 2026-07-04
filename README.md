@@ -7,6 +7,10 @@
 
 Multi-plugin security audit tool. Scans repositories and infrastructure for secrets, CVEs, misconfigurations, HTTP header issues, open ports and policy violations — producing a security score, HTML report and CI integration.
 
+![SecureAudit dashboard showing a scan run with severity-tagged findings across multiple plugins](docs/images/dashboard.png)
+
+*The `secureaudit serve` dashboard — real scan output, not a mockup: severity-tagged findings (AWS/API key detection, a root-running Dockerfile, an unpinned base image) with exact file:line locations.*
+
 ---
 
 ## Features
