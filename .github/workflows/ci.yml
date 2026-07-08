@@ -52,7 +52,13 @@ jobs:
       - name: Install built wheel in a clean venv
         run: |
           python -m venv /tmp/smoke-venv
-          /tmp/smoke-venv/bin/pip install "$(echo dist/*.whl)[dashboard]"
+          if ! /tmp/smoke-venv/bin/pip install "$(echo dist/*.whl)[dashboard]" > /tmp/pip-install.log 2>&1; then
+            echo "::error::pip install failed. Last 30 lines of output:"
+            tail -n 30 /tmp/pip-install.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
 
       - name: "Integration test: every README-documented command, against the real installed wheel"
         # This is the exact gap that let 5 real bugs (schedule, digest,
