@@ -50,15 +50,30 @@ jobs:
         run: twine check dist/*
 
       - name: Install built wheel in a clean venv
+        # Retries the install up to 3 times: a real, observed transient
+        # failure (three consecutive CI runs failed on a cold venv
+        # pulling fastapi/uvicorn's ~15 transitive dependencies, then
+        # succeeded on the very next run with no code change at all --
+        # confirmed as network flakiness, not a real regression, by
+        # reproducing the identical install successfully every time
+        # locally). The ::error:: annotations still fire on a final
+        # failure after all retries are exhausted, so a genuine
+        # packaging regression is still loud and diagnosable, not
+        # silently retried away.
         run: |
           python -m venv /tmp/smoke-venv
-          if ! /tmp/smoke-venv/bin/pip install "$(echo dist/*.whl)[dashboard]" > /tmp/pip-install.log 2>&1; then
-            echo "::error::pip install failed. Last 30 lines of output:"
-            tail -n 30 /tmp/pip-install.log | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            exit 1
-          fi
+          for attempt in 1 2 3; do
+            if /tmp/smoke-venv/bin/pip install "$(echo dist/*.whl)[dashboard]" > /tmp/pip-install.log 2>&1; then
+              exit 0
+            fi
+            echo "pip install attempt $attempt/3 failed, retrying..."
+            sleep 5
+          done
+          echo "::error::pip install failed after 3 attempts. Last 30 lines of output:"
+          tail -n 30 /tmp/pip-install.log | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
 
       - name: "Integration test: every README-documented command, against the real installed wheel"
         # This is the exact gap that let 5 real bugs (schedule, digest,
