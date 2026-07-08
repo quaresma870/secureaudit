@@ -121,6 +121,87 @@ def init(target, yes, force, baseline):
 
 
 @cli.command()
+@click.option("--port", default=8321, show_default=True, help="Port for the demo dashboard.")
+@click.option("--no-serve", is_flag=True, help="Scan and print results, but skip starting the dashboard.")
+def demo(port, no_serve):
+    """Run a real scan against a small, throwaway demo project with
+    deliberately planted findings, then start the dashboard so you can
+    see real output immediately — no config, no target project, no
+    authorization file to write.
+
+    Everything this creates (the demo project, the demo database) lives
+    under a temp directory and is left behind for you to inspect or
+    delete afterwards; nothing is written into this repository.
+    """
+    import tempfile
+
+    demo_dir = Path(tempfile.mkdtemp(prefix="secureaudit-demo-"))
+    (demo_dir / "app.py").write_text(
+        'API_KEY = "sk-live-abcdef1234567890ABCDEFGHIJKLMN"\n'
+        'AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n\n'
+        "def get_user(user_id):\n"
+        "    import sqlite3\n"
+        "    conn = sqlite3.connect('app.db')\n"
+        "    query = f\"SELECT * FROM users WHERE id = {user_id}\"\n"
+        "    return conn.execute(query).fetchall()\n"
+    )
+    (demo_dir / "Dockerfile").write_text(
+        "FROM python:latest\nADD . /app\nCMD [\"python\", \"app.py\"]\n"
+    )
+    (demo_dir / "requirements.txt").write_text("flask==2.0.1\nrequests==2.25.0\n")
+    (demo_dir / "secureaudit.yml").write_text("project: demo\n")
+
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=demo_dir, check=False)
+    subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=demo_dir, check=False)
+    subprocess.run(["git", "config", "user.name", "Demo"], cwd=demo_dir, check=False)
+    subprocess.run(["git", "add", "-A"], cwd=demo_dir, check=False)
+    subprocess.run(["git", "commit", "-q", "-m", "demo project"], cwd=demo_dir, check=False)
+
+    db_path = demo_dir / "demo-audits.db"
+
+    console.print()
+    console.rule("[bold cyan]🔐 SecureAudit — Demo[/bold cyan]")
+    console.print(
+        "\n[dim]Scanning a throwaway demo project with real, deliberately planted "
+        "findings (a fake AWS key, a root-running Dockerfile, unpinned deps) — "
+        "nothing here is your own code.[/dim]"
+    )
+    console.print(f"[dim]Demo project: {demo_dir}[/dim]\n")
+
+    cfg = load_config(demo_dir / "secureaudit.yml")
+    engine = AuditEngine(cfg)
+    result = engine.run(str(demo_dir))
+    print_summary(result, cfg.fail_below)
+
+    from secureaudit.reports.history import save
+    save(result, str(db_path), project=cfg.project)
+
+    if no_serve:
+        console.print(
+            f"[dim]Skipped starting the dashboard (--no-serve). Explore it yourself with:[/dim]\n"
+            f"  [cyan]secureaudit serve --db {db_path}[/cyan]\n"
+        )
+        return
+
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn
+    except ImportError:
+        console.print("[red]Dashboard dependencies missing.[/red]")
+        console.print("Install with: pip install 'secureaudit\\[dashboard]'")
+        console.print(f"\n[dim]The demo scan itself completed fine — results are in {db_path}[/dim]")
+        return
+
+    from secureaudit.dashboard.app import create_app
+
+    console.print(f"[bold cyan]🔐 SecureAudit Dashboard[/bold cyan] → http://127.0.0.1:{port}")
+    console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
+    app = create_app(str(db_path))
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+
+
+@cli.command()
 @click.argument("target", default=".", type=click.Path(exists=True))
 @click.option("--config", "-c", default=None, help="Path to secureaudit.yml")
 @click.option("--plugins", "-p", default=None, help="Comma-separated list of plugins to run")

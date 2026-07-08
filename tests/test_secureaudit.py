@@ -4230,3 +4230,96 @@ class TestPCIDSSCLI:
             assert "PCI-DSS" in result.output
             assert "6.2.4" in result.output
             assert "6.3.1" in result.output
+
+
+# ── Demo command ──────────────────────────────────────────────────────────────
+
+class TestDemoCommand:
+    """Issue #38: `secureaudit demo` — a single command that scans a
+    throwaway demo project with real planted findings and starts the
+    dashboard, with zero configuration required from the person trying
+    it out."""
+
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_demo_no_serve_scans_and_reports_real_findings(self):
+        """--no-serve avoids starting a real HTTP server inside a test,
+        while still exercising the real scan/save path end-to-end."""
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["demo", "--no-serve"])
+        assert result.exit_code == 0, result.output
+        assert "AWS Secret Key" in result.output
+        assert "CRITICAL" in result.output
+        assert "Skipped starting the dashboard" in result.output
+        assert "secureaudit serve --db" in result.output
+
+    def test_demo_creates_project_outside_the_repo(self):
+        """The demo project must live under a temp directory, not be
+        written into this repository's own working tree."""
+        import re
+
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["demo", "--no-serve"])
+        match = re.search(r"Demo project: (\S+)", result.output)
+        assert match, "expected the demo project path to be printed"
+        demo_path = Path(match.group(1))
+        repo_root = Path(__file__).parent.parent.resolve()
+        assert repo_root not in demo_path.resolve().parents, (
+            f"demo project {demo_path} was created inside the repo ({repo_root}) "
+            f"-- must be a temp directory instead"
+        )
+
+    def test_demo_persists_to_a_real_db(self):
+        """The demo command's own db path (printed on --no-serve) must
+        be a real, queryable SQLite history db -- not just a claim."""
+        import re
+
+        from secureaudit.cli import cli
+        from secureaudit.reports.history import get_runs
+        runner = self._runner()
+        result = runner.invoke(cli, ["demo", "--no-serve"])
+        match = re.search(r"secureaudit serve --db (\S+)", result.output)
+        assert match
+        db_path = match.group(1)
+        runs = get_runs(db_path)
+        assert len(runs) == 1
+        assert runs[0]["score"] < 70  # the demo project is deliberately insecure
+
+    def test_demo_low_score_does_not_cause_a_nonzero_exit(self):
+        """Unlike `scan`, `demo` should never fail the process just
+        because the (deliberately insecure) demo project scores low --
+        it's a demonstration, not a CI gate. Confirms this explicitly
+        rather than assuming print_summary's own threshold-fail styling
+        doesn't also propagate to the exit code."""
+        from secureaudit.cli import cli
+        runner = self._runner()
+        result = runner.invoke(cli, ["demo", "--no-serve"])
+        assert result.exit_code == 0
+
+    def test_demo_missing_dashboard_deps_still_reports_scan_results(self):
+        """If fastapi/uvicorn genuinely aren't installed, `demo` (unlike
+        `serve`) should NOT hard-fail -- the scan itself already
+        succeeded and is useful on its own; only the dashboard-start
+        step is skipped, with a clear pointer to fix and retry."""
+        import builtins
+        from unittest.mock import patch
+
+        from secureaudit.cli import cli
+
+        real_import = builtins.__import__
+        def fake_import(name, *args, **kwargs):
+            if name == "fastapi":
+                raise ImportError("simulated: fastapi not installed")
+            return real_import(name, *args, **kwargs)
+
+        runner = self._runner()
+        with patch.object(builtins, "__import__", side_effect=fake_import):
+            result = runner.invoke(cli, ["demo"])
+        assert result.exit_code == 0, result.output
+        assert "AWS Secret Key" in result.output  # the scan itself still ran and reported
+        assert "Dashboard dependencies missing" in result.output
+        assert "secureaudit[dashboard]" in result.output
