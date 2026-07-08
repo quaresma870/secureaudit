@@ -23,7 +23,7 @@ Multi-plugin security audit tool. Scans repositories and infrastructure for secr
 - ✅ **SARIF 2.1.0 output** — validated against the official schema, wired into the GitHub Action for automatic Security tab integration
 - ✅ **GitHub Action** — block PRs if score drops below threshold
 - ✅ **Config file** — `secureaudit.yml` for full customisation
-- ✅ **313 tests** — models, plugins, engine, dashboard, compliance, SARIF
+- ✅ **318 tests** — models, plugins, engine, dashboard, compliance, SARIF
 
 ---
 
@@ -86,6 +86,16 @@ Optional extras:
 pip install secureaudit[sast]        # adds semgrep for the sast plugin
 pip install secureaudit[dashboard]   # adds fastapi+uvicorn for `secureaudit serve`
 pip install secureaudit[all]         # everything above
+```
+
+### Try it in one command
+
+No config, no target project, no writing anything — scans a throwaway demo
+project with real, deliberately planted findings and opens the dashboard:
+
+```bash
+pip install secureaudit[dashboard]
+secureaudit demo
 ```
 
 **For contributors** — clone and run from source:
