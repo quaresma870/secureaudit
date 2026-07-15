@@ -151,12 +151,33 @@ def demo(port, no_serve):
     (demo_dir / "requirements.txt").write_text("flask==2.0.1\nrequests==2.25.0\n")
     (demo_dir / "secureaudit.yml").write_text("project: demo\n")
 
+    import shutil
     import subprocess
-    subprocess.run(["git", "init", "-q"], cwd=demo_dir, check=False)
-    subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=demo_dir, check=False)
-    subprocess.run(["git", "config", "user.name", "Demo"], cwd=demo_dir, check=False)
-    subprocess.run(["git", "add", "-A"], cwd=demo_dir, check=False)
-    subprocess.run(["git", "commit", "-q", "-m", "demo project"], cwd=demo_dir, check=False)
+
+    if shutil.which("git") is None:
+        # subprocess.run(..., check=False) only suppresses a non-zero
+        # exit code from git itself -- it does NOT catch git being
+        # entirely absent from PATH, which raises a raw
+        # FileNotFoundError instead. Confirmed by actually running this
+        # command with an empty PATH before fixing it, not assumed as a
+        # risk from reading the code -- a real, plausible scenario for
+        # a minimal container or a stripped-down environment where git
+        # was never installed system-wide. The demo's other findings
+        # (secrets, Dockerfile policy) don't depend on git at all, only
+        # the git_history plugin's "historical secret" showcase finding
+        # does, so this degrades to a slightly smaller demo rather than
+        # failing outright.
+        console.print(
+            "[yellow]⚠ git not found on PATH — skipping git init. "
+            "The git_history plugin's demo finding will be unavailable, "
+            "but the rest of the scan still runs normally.[/yellow]\n"
+        )
+    else:
+        subprocess.run(["git", "init", "-q"], cwd=demo_dir, check=False)
+        subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=demo_dir, check=False)
+        subprocess.run(["git", "config", "user.name", "Demo"], cwd=demo_dir, check=False)
+        subprocess.run(["git", "add", "-A"], cwd=demo_dir, check=False)
+        subprocess.run(["git", "commit", "-q", "-m", "demo project"], cwd=demo_dir, check=False)
 
     db_path = demo_dir / "demo-audits.db"
 
@@ -515,19 +536,34 @@ def schedule(
 
     from secureaudit.scheduler import run_schedule
     plugin_list = [p.strip() for p in plugins.split(",")] if plugins else None
-    run_schedule(
-        target=target,
-        cron_expr=cron,
-        plugins=plugin_list,
-        db=db,
-        alert_webhook=alert_webhook,
-        alert_slack=alert_slack,
-        alert_teams=alert_teams,
-        dashboard_url=dashboard_url,
-        fail_below=fail_below,
-        output_dir=output_dir,
-        config_path=config,
-    )
+    try:
+        run_schedule(
+            target=target,
+            cron_expr=cron,
+            plugins=plugin_list,
+            db=db,
+            alert_webhook=alert_webhook,
+            alert_slack=alert_slack,
+            alert_teams=alert_teams,
+            dashboard_url=dashboard_url,
+            fail_below=fail_below,
+            output_dir=output_dir,
+            config_path=config,
+        )
+    except ValueError as exc:
+        # _parse_cron raises ValueError for a malformed --cron
+        # expression — confirmed by actually passing a garbage --cron
+        # value through the real installed CLI and hitting a raw,
+        # unhandled traceback before this was added.
+        console.print(f"[red]✘ Invalid --cron expression:[/red] {exc}")
+        console.print(
+            "[dim]Supported: '*/N * * * *' (every N minutes), '0 */N * * *' (every N hours), "
+            "'MM HH * * *' (daily at HH:MM), 'MM HH * * D' (weekly, D=0 Mon..6 Sun).[/dim]"
+        )
+        sys.exit(1)
+    except RuntimeError as exc:
+        console.print(f"[red]✘ {exc}[/red]")
+        sys.exit(1)
 
 
 @cli.command()

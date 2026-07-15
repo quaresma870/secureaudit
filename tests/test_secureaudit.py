@@ -337,6 +337,77 @@ class TestScheduler:
         with pytest.raises((ValueError, RuntimeError)):
             _parse_cron("not a cron", lambda: None)
 
+    def test_out_of_range_minute_raises_clean_value_error(self):
+        """Regression test for a real, reproduced bug: minute=60 passes
+        isdigit() (a valid digit string) but is out of the valid 0-59
+        range. Previously reached the `schedule` library's own .at()
+        call, which raises schedule.ScheduleValueError -- NOT a
+        subclass of ValueError -- producing a raw, unhandled traceback
+        through the real installed CLI instead of a clean error. Found
+        while auditing the sibling redteam-toolkit repo's identical,
+        already-fixed bug and confirming this module (the ORIGINAL
+        source that repo explicitly says it ported this pattern from)
+        still had it unfixed."""
+        from secureaudit.scheduler import _parse_cron
+        try:
+            import schedule
+        except ImportError:
+            pytest.skip("schedule not installed")
+        schedule.clear()
+        try:
+            with pytest.raises(ValueError, match="Invalid minute: 60"):
+                _parse_cron("60 0 * * *", lambda: None)
+        finally:
+            schedule.clear()
+
+    def test_out_of_range_hour_raises_clean_value_error(self):
+        from secureaudit.scheduler import _parse_cron
+        try:
+            import schedule
+        except ImportError:
+            pytest.skip("schedule not installed")
+        schedule.clear()
+        try:
+            with pytest.raises(ValueError, match="Invalid hour: 25"):
+                _parse_cron("0 25 * * *", lambda: None)
+        finally:
+            schedule.clear()
+
+    def test_zero_minute_interval_raises_instead_of_hanging(self):
+        """Regression test for a real, reproduced, and much more
+        serious bug than the traceback ones: `*/0 * * * *` (an easy
+        typo of `*/30` losing a digit) doesn't raise ANYTHING when
+        passed to schedule.every(0).minutes -- it hangs the process
+        indefinitely inside the schedule library's own internal
+        next-run computation, a genuine denial-of-service. Confirmed by
+        actually letting this run in a real terminal until it needed to
+        be killed with a timeout, not assumed as a risk from reading
+        the code."""
+        from secureaudit.scheduler import _parse_cron
+        try:
+            import schedule
+        except ImportError:
+            pytest.skip("schedule not installed")
+        schedule.clear()
+        try:
+            with pytest.raises(ValueError, match="minute interval.*must be a positive integer"):
+                _parse_cron("*/0 * * * *", lambda: None)
+        finally:
+            schedule.clear()
+
+    def test_zero_hour_interval_raises_instead_of_hanging(self):
+        from secureaudit.scheduler import _parse_cron
+        try:
+            import schedule
+        except ImportError:
+            pytest.skip("schedule not installed")
+        schedule.clear()
+        try:
+            with pytest.raises(ValueError, match="hour interval.*must be a positive integer"):
+                _parse_cron("0 */0 * * *", lambda: None)
+        finally:
+            schedule.clear()
+
     def test_run_schedule_immediate_job_does_not_crash(self, monkeypatch):
         """Regression test for a real, reproduced bug: run_schedule's
         job() imported `from secureaudit.output.terminal import
@@ -371,6 +442,26 @@ class TestScheduler:
                 target=d, cron_expr="0 6 * * 1", plugins=["policy"], db=None,
                 alert_webhook=None, fail_below=70, output_dir=None, config_path=None,
             )
+
+
+class TestScheduleCLIErrorHandling:
+    """The CLI-level wrapping of _parse_cron's errors — confirms the
+    real `schedule` command shows a clean message and exits non-zero,
+    rather than a raw traceback, for an invalid --cron value."""
+
+    def _runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    def test_invalid_cron_shows_clean_error_not_traceback(self):
+        from secureaudit.cli import cli
+        runner = self._runner()
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "app.py").write_text("x = 1\n")
+            result = runner.invoke(cli, ["schedule", d, "--cron", "60 0 * * *"])
+            assert result.exit_code == 1
+            assert "Invalid --cron expression" in result.output
+            assert "Traceback" not in result.output
 
 
 # ── SAST Plugin ───────────────────────────────────────────────────────────────
@@ -4323,3 +4414,28 @@ class TestDemoCommand:
         assert "AWS Secret Key" in result.output  # the scan itself still ran and reported
         assert "Dashboard dependencies missing" in result.output
         assert "secureaudit[dashboard]" in result.output
+
+    def test_demo_missing_git_degrades_gracefully_instead_of_crashing(self):
+        """Regression test for a real, reproduced bug: with git absent
+        from PATH entirely (a plausible scenario for a minimal
+        container or a stripped-down environment), the demo command's
+        own subprocess.run(["git", "init", ...], check=False) calls
+        raised a raw, unhandled FileNotFoundError -- check=False only
+        suppresses a non-zero exit code FROM git, not git being missing
+        entirely. Confirmed by actually running the real installed CLI
+        with an empty PATH before fixing it, not assumed as a risk from
+        reading the code. The fix degrades to a slightly smaller demo
+        (the git_history plugin's "historical secret" showcase finding
+        is unavailable) rather than crashing outright -- the other
+        findings (secrets, Dockerfile policy) don't depend on git."""
+        from unittest.mock import patch
+
+        from secureaudit.cli import cli
+
+        runner = self._runner()
+        with patch("shutil.which", return_value=None):
+            result = runner.invoke(cli, ["demo", "--no-serve"])
+        assert result.exit_code == 0, result.output
+        assert "git not found on PATH" in result.output
+        assert "AWS Secret Key" in result.output  # the rest of the scan still ran
+        assert "Traceback" not in result.output
