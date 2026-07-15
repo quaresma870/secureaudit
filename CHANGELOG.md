@@ -3,6 +3,11 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.7.3
+- fix: **`schedule --cron "*/0 * * * *"` hung the process indefinitely** — a real, reproduced denial-of-service (an easy typo losing a digit from `*/30`), confirmed by letting it run until it needed to be killed. Fixed by validating the interval is a positive integer before it ever reaches the `schedule` library. Found by auditing the sibling redteam-toolkit repo's identical, already-fixed bug and checking whether this module — the ORIGINAL source that repo explicitly says it ported this pattern from — still had it unfixed. It did.
+- fix: **out-of-range `--cron` hour/minute values (e.g. minute=60, hour=25) produced a raw, unhandled traceback** — `schedule.ScheduleValueError` isn't a subclass of `ValueError`, and the CLI's `schedule` command had no error handling around `run_schedule()` at all. Fixed with explicit range validation, a `schedule.ScheduleError` catch-all, and a try/except at the CLI call site.
+- fix: **`demo` crashed with a raw `FileNotFoundError` if `git` wasn't on PATH at all** — `subprocess.run(check=False)` only suppresses a non-zero exit code from git, not git being entirely absent. Fixed by checking `shutil.which("git")` first and degrading gracefully (the git_history plugin's demo finding becomes unavailable; the rest of the scan runs normally).
+
 ### v1.7.2
 - feat: **one-command demo mode** — `secureaudit demo` scans a throwaway demo project with real, deliberately planted findings and starts the dashboard, zero config required — closes #38. `--no-serve` scans and reports without starting the dashboard. Everything lives under a temp directory, never inside the repo.
 
