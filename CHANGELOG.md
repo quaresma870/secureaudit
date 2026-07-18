@@ -3,6 +3,9 @@
 All notable changes to this project are documented here. See the
 [README](README.md) for current features and usage.
 
+### v1.7.4
+- feat: **CI now tests against Python 3.11, 3.12, and 3.13** (previously only 3.11) — verifying the `requires-python = ">=3.11"` compatibility claim in `pyproject.toml` is actually true, not just declared. Same fix already verified and merged in the sibling redteam-toolkit repo. Verified on real CI before merging: all three versions pass.
+
 ### v1.7.3
 - fix: **`schedule --cron "*/0 * * * *"` hung the process indefinitely** — a real, reproduced denial-of-service (an easy typo losing a digit from `*/30`), confirmed by letting it run until it needed to be killed. Fixed by validating the interval is a positive integer before it ever reaches the `schedule` library. Found by auditing the sibling redteam-toolkit repo's identical, already-fixed bug and checking whether this module — the ORIGINAL source that repo explicitly says it ported this pattern from — still had it unfixed. It did.
 - fix: **out-of-range `--cron` hour/minute values (e.g. minute=60, hour=25) produced a raw, unhandled traceback** — `schedule.ScheduleValueError` isn't a subclass of `ValueError`, and the CLI's `schedule` command had no error handling around `run_schedule()` at all. Fixed with explicit range validation, a `schedule.ScheduleError` catch-all, and a try/except at the CLI call site.
